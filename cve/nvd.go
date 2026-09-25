@@ -25,29 +25,70 @@ type NVDSource struct{}
 
 func (o NVDSource) Name() string { return "NVD" }
 
+type nvdItem struct {
+	id     string
+	detail string
+	score  float64
+	cpes   []nvdCPE
+}
+
+type nvdCPE struct {
+	criteria string
+	startInc string
+	startExc string
+	endInc   string
+	endExc   string
+}
+
 func (o NVDSource) Query(ctx context.Context, vendor, product, version, ecosystem string) ([]Finding, error) {
+	// If version is not set, check if the product string contains an embedded version (e.g. "curl 7.0")
+	if version == "" {
+		if app, ver := versioncanon.ExtractAppAndVersion(product); ver != "" {
+			product = app
+			version = ver
+		}
+	}
+
 	if version == "" {
 		return o.freeFormQuery(ctx, product)
 	}
 
-	targeted, err := o.queryByKeyword(ctx, product+" "+version)
-	if err != nil {
-		return nil, err
-	}
-	if len(targeted) > 0 {
-		return targeted, nil
-	}
+	return o.queryByProductAndVersion(ctx, product, version)
+}
 
-	broad, err := o.queryByKeyword(ctx, product)
+func (o NVDSource) queryByProductAndVersion(ctx context.Context, product, version string) ([]Finding, error) {
+	// 1. Query NVD for the product to retrieve candidate CVEs with full CPE metadata
+	items, err := o.queryRawNVD(ctx, product)
 	if err != nil {
 		return nil, err
 	}
 
-	filtered := filterByVersionVariants(broad, version)
+	filtered := filterNVDItems(items, product, version)
 	if len(filtered) > 0 {
 		return filtered, nil
 	}
-	return broad, nil
+
+	// 2. Fallback: targeted keyword search with product + version
+	targetedItems, err := o.queryRawNVD(ctx, product+" "+version)
+	if err == nil && len(targetedItems) > 0 {
+		targetedFiltered := filterNVDItems(targetedItems, product, version)
+		if len(targetedFiltered) > 0 {
+			return targetedFiltered, nil
+		}
+	}
+
+	// 3. Fallback: check aliases if any
+	if alias, ok := cveAliases[strings.ToLower(strings.TrimSpace(product))]; ok {
+		aliasItems, aliasErr := o.queryRawNVD(ctx, alias)
+		if aliasErr == nil && len(aliasItems) > 0 {
+			aliasFiltered := filterNVDItems(aliasItems, alias, version)
+			if len(aliasFiltered) > 0 {
+				return aliasFiltered, nil
+			}
+		}
+	}
+
+	return nil, nil
 }
 
 func (o NVDSource) freeFormQuery(ctx context.Context, keyword string) ([]Finding, error) {
@@ -73,7 +114,8 @@ func (o NVDSource) freeFormQuery(ctx context.Context, keyword string) ([]Finding
 
 	seen := make(map[string]struct{})
 	for _, word := range words {
-		if len(word) < 3 {
+		// Skip tokens that are versions, pure numbers, or stop words to avoid querying random things
+		if len(word) < 3 || versioncanon.IsVersion(word) || isPureNumber(word) || isStopWord(word) {
 			continue
 		}
 		wordResults, err := o.queryByKeyword(ctx, word)
@@ -91,7 +133,7 @@ func (o NVDSource) freeFormQuery(ctx context.Context, keyword string) ([]Finding
 	return findings, nil
 }
 
-func (o NVDSource) queryByKeyword(ctx context.Context, keyword string) ([]Finding, error) {
+func (o NVDSource) queryRawNVD(ctx context.Context, keyword string) ([]nvdItem, error) {
 	URL := fmt.Sprintf("https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=%s&resultsPerPage=200",
 		url.QueryEscape(strings.TrimSpace(keyword)),
 	)
@@ -120,6 +162,18 @@ func (o NVDSource) queryByKeyword(ctx context.Context, keyword string) ([]Findin
 						} `json:"cvssData"`
 					} `json:"cvssMetricV2"`
 				} `json:"metrics"`
+				Configurations []struct {
+					Nodes []struct {
+						CPEMatch []struct {
+							Vulnerable            bool   `json:"vulnerable"`
+							Criteria              string `json:"criteria"`
+							VersionStartIncluding string `json:"versionStartIncluding"`
+							VersionStartExcluding string `json:"versionStartExcluding"`
+							VersionEndIncluding   string `json:"versionEndIncluding"`
+							VersionEndExcluding   string `json:"versionEndExcluding"`
+						} `json:"cpeMatch"`
+					} `json:"nodes"`
+				} `json:"configurations"`
 			} `json:"cve"`
 		} `json:"vulnerabilities"`
 	}
@@ -129,47 +183,204 @@ func (o NVDSource) queryByKeyword(ctx context.Context, keyword string) ([]Findin
 		return nil, err
 	}
 
-	var findings []Finding
+	var items []nvdItem
 	for _, vuln := range nvdResp.Vulnerabilities {
-		var find Finding
-		find.CVE = vuln.CVE.ID
-		find.Source = o.Name()
+		var item nvdItem
+		item.id = vuln.CVE.ID
 		for _, d := range vuln.CVE.Descriptions {
 			if d.Lang == "en" {
-				find.Detail = d.Value
+				item.detail = d.Value
 				break
 			}
 		}
 		if vuln.CVE.Metrics != nil {
 			if len(vuln.CVE.Metrics.CvssMetricV31) > 0 {
-				find.Score = vuln.CVE.Metrics.CvssMetricV31[0].CvssData.BaseScore
+				item.score = vuln.CVE.Metrics.CvssMetricV31[0].CvssData.BaseScore
 			} else if len(vuln.CVE.Metrics.CvssMetricV30) > 0 {
-				find.Score = vuln.CVE.Metrics.CvssMetricV30[0].CvssData.BaseScore
+				item.score = vuln.CVE.Metrics.CvssMetricV30[0].CvssData.BaseScore
 			} else if len(vuln.CVE.Metrics.CvssMetricV2) > 0 {
-				find.Score = vuln.CVE.Metrics.CvssMetricV2[0].CvssData.BaseScore
+				item.score = vuln.CVE.Metrics.CvssMetricV2[0].CvssData.BaseScore
 			}
 		}
-		findings = append(findings, find)
+		for _, conf := range vuln.CVE.Configurations {
+			for _, node := range conf.Nodes {
+				for _, m := range node.CPEMatch {
+					if m.Vulnerable {
+						item.cpes = append(item.cpes, nvdCPE{
+							criteria: m.Criteria,
+							startInc: m.VersionStartIncluding,
+							startExc: m.VersionStartExcluding,
+							endInc:   m.VersionEndIncluding,
+							endExc:   m.VersionEndExcluding,
+						})
+					}
+				}
+			}
+		}
+		items = append(items, item)
 	}
 
+	return items, nil
+}
+
+func (o NVDSource) queryByKeyword(ctx context.Context, keyword string) ([]Finding, error) {
+	items, err := o.queryRawNVD(ctx, keyword)
+	if err != nil {
+		return nil, err
+	}
+	findings := make([]Finding, len(items))
+	for i, item := range items {
+		findings[i] = Finding{
+			CVE:    item.id,
+			Source: o.Name(),
+			Detail: item.detail,
+			Score:  item.score,
+		}
+	}
 	return findings, nil
 }
 
-func filterByVersionVariants(findings []Finding, version string) []Finding {
-	variants := versioncanon.Variants(version)
-	if len(variants) == 0 {
-		return findings
+func filterNVDItems(items []nvdItem, product, version string) []Finding {
+	productLower := strings.ToLower(strings.TrimSpace(product))
+	var findings []Finding
+
+	for _, item := range items {
+		if !matchesProductAndVersion(item, productLower, version) {
+			continue
+		}
+		findings = append(findings, Finding{
+			CVE:    item.id,
+			Source: "NVD",
+			Detail: item.detail,
+			Score:  item.score,
+		})
 	}
 
-	var filtered []Finding
-	for _, finding := range findings {
-		detail := strings.ToLower(finding.Detail)
-		for _, variant := range variants {
-			if strings.Contains(detail, strings.ToLower(variant)) {
-				filtered = append(filtered, finding)
-				break
+	return findings
+}
+
+func matchesProductAndVersion(item nvdItem, productLower, version string) bool {
+	hasCPE := len(item.cpes) > 0
+	cpeProductMatched := false
+	cpeVersionMatched := false
+
+	for _, cpe := range item.cpes {
+		// CPE format: cpe:2.3:part:vendor:product:version:...
+		parts := strings.Split(cpe.criteria, ":")
+		if len(parts) >= 5 {
+			cpeProd := strings.ToLower(parts[4])
+			if isProductMatch(cpeProd, productLower) {
+				cpeProductMatched = true
+				if version == "" {
+					return true
+				}
+
+				// Check exact or variant version in criteria
+				if len(parts) >= 6 {
+					cpeVer := parts[5]
+					if cpeVer != "" && cpeVer != "*" && cpeVer != "-" {
+						if versioncanon.Compare(version, cpeVer) == 0 {
+							cpeVersionMatched = true
+							break
+						}
+					}
+				}
+
+				// Check version range
+				if cpe.startInc != "" || cpe.startExc != "" || cpe.endInc != "" || cpe.endExc != "" {
+					if versioncanon.MatchesRange(version, cpe.startInc, cpe.startExc, cpe.endInc, cpe.endExc) {
+						cpeVersionMatched = true
+						break
+					}
+				}
 			}
 		}
 	}
-	return filtered
+
+	if cpeVersionMatched {
+		return true
+	}
+
+	// If CPEs exist but none matched the product, this CVE is for another software
+	if hasCPE && !cpeProductMatched {
+		return false
+	}
+
+	// Description fallback: verify product and version match in description
+	descLower := strings.ToLower(item.detail)
+	if !containsWord(descLower, productLower) && !containsWord(descLower, "lib"+productLower) {
+		return false
+	}
+
+	if version != "" {
+		return versioncanon.MatchVersionInText(item.detail, version)
+	}
+
+	return true
+}
+
+func isProductMatch(cpeProd, userProd string) bool {
+	cp := strings.ToLower(strings.TrimSpace(cpeProd))
+	up := strings.ToLower(strings.TrimSpace(userProd))
+	if cp == up {
+		return true
+	}
+	if cp == "lib"+up || up == "lib"+cp {
+		return true
+	}
+	// Normalize spaces, dashes and underscores
+	cpNorm := strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(cp, "-", ""), "_", ""), " ", "")
+	upNorm := strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(up, "-", ""), "_", ""), " ", "")
+	if cpNorm == upNorm {
+		return true
+	}
+	if strings.Contains(cpNorm, upNorm) || strings.Contains(upNorm, cpNorm) {
+		return true
+	}
+	return false
+}
+
+func containsWord(text, word string) bool {
+	idx := 0
+	for {
+		pos := strings.Index(text[idx:], word)
+		if pos == -1 {
+			return false
+		}
+		absPos := idx + pos
+		endPos := absPos + len(word)
+		idx = endPos
+
+		validBefore := absPos == 0 || !isAlnum(text[absPos-1])
+		validAfter := endPos == len(text) || !isAlnum(text[endPos])
+		if validBefore && validAfter {
+			return true
+		}
+	}
+}
+
+func isAlnum(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
+}
+
+func isPureNumber(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && r != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+func isStopWord(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "for", "the", "and", "with", "from", "version", "ver", "all", "cve", "vuln", "vulnerability":
+		return true
+	default:
+		return false
+	}
 }

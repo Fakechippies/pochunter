@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Fakechippies/pochunter/httpclient"
+	"github.com/Fakechippies/pochunter/versioncanon"
 )
 
 type CIRCLSource struct{}
@@ -13,6 +14,13 @@ type CIRCLSource struct{}
 func (o CIRCLSource) Name() string { return "CIRCL" }
 
 func (o CIRCLSource) Query(ctx context.Context, vendor, product, version, ecosystem string) ([]Finding, error) {
+	if version == "" {
+		if app, ver := versioncanon.ExtractAppAndVersion(product); ver != "" {
+			product = app
+			version = ver
+		}
+	}
+
 	if vendor == "" {
 		vendor = product // fallback: some CIRCL endpoints tolerate vendor == product
 	}
@@ -34,11 +42,41 @@ func (o CIRCLSource) Query(ctx context.Context, vendor, product, version, ecosys
 			if len(entry) == 0 {
 				continue
 			}
-			id, ok := entry[0].(string)
-			if !ok || id == "" {
+
+			var cveID string
+			detail := "Matched by CIRCL vendor/product search"
+
+			if id, ok := entry[0].(string); ok && id != "" {
+				cveID = strings.ToUpper(id)
+			} else if m, ok := entry[0].(map[string]interface{}); ok {
+				if meta, ok := m["cveMetadata"].(map[string]interface{}); ok {
+					if id, ok := meta["cveId"].(string); ok {
+						cveID = strings.ToUpper(id)
+					}
+				}
+				if cveID == "" {
+					if id, ok := m["id"].(string); ok {
+						cveID = strings.ToUpper(id)
+					}
+				}
+				if cont, ok := m["containers"].(map[string]interface{}); ok {
+					if cna, ok := cont["cna"].(map[string]interface{}); ok {
+						if title, ok := cna["title"].(string); ok && title != "" {
+							detail = title
+						} else if descs, ok := cna["descriptions"].([]interface{}); ok && len(descs) > 0 {
+							if dMap, ok := descs[0].(map[string]interface{}); ok {
+								if val, ok := dMap["value"].(string); ok && val != "" {
+									detail = val
+								}
+							}
+						}
+					}
+				}
+			}
+
+			if cveID == "" || !strings.HasPrefix(cveID, "CVE-") {
 				continue
 			}
-			cveID := strings.ToUpper(id)
 			if _, ok := seen[cveID]; ok {
 				continue
 			}
@@ -47,7 +85,7 @@ func (o CIRCLSource) Query(ctx context.Context, vendor, product, version, ecosys
 			findings = append(findings, Finding{
 				CVE:    cveID,
 				Source: o.Name(),
-				Detail: "Matched by CIRCL vendor/product search",
+				Detail: detail,
 			})
 		}
 	}

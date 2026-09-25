@@ -15,6 +15,7 @@ import (
 
 	"github.com/Fakechippies/pochunter/cve"
 	"github.com/Fakechippies/pochunter/poc"
+	"github.com/Fakechippies/pochunter/versioncanon"
 	"github.com/spf13/cobra"
 )
 
@@ -94,6 +95,7 @@ func run(args []string, opts options) error {
 		return nil
 	}
 
+	rawQuery := strings.Join(args, " ")
 	vendor, product, version, ecosystem, err := resolveSearchInput(args, opts)
 	if err != nil {
 		return err
@@ -101,7 +103,11 @@ func run(args []string, opts options) error {
 
 	isFreeForm := opts.app == ""
 	if isFreeForm {
-		progressf("Free-form CVEs for query=%q", product)
+		displayQuery := rawQuery
+		if displayQuery == "" {
+			displayQuery = product
+		}
+		progressf("Free-form CVEs for query=%q", displayQuery)
 	} else {
 		progressf("Searching CVEs for vendor=%q product=%q version=%q ecosystem=%q", vendor, product, version, ecosystem)
 	}
@@ -252,16 +258,17 @@ func collectPOCsForCVEs(ctx context.Context, sources []poc.Source, cveIDs []stri
 	sem := make(chan struct{}, maxWorkers)
 	results := make(chan pocResult, len(cveIDs))
 	var wg sync.WaitGroup
+	var rateLimitedSources sync.Map
 
 	for _, cveID := range cveIDs {
 		wg.Add(1)
-		go func() {
+		go func(id string) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			findings, err := queryPOCsForCVE(ctx, sources, cveID)
-			results <- pocResult{cveID: cveID, findings: findings, err: err}
-		}()
+			findings, err := queryPOCsForCVE(ctx, sources, id, &rateLimitedSources)
+			results <- pocResult{cveID: id, findings: findings, err: err}
+		}(cveID)
 	}
 
 	wg.Wait()
@@ -275,15 +282,23 @@ func collectPOCsForCVEs(ctx context.Context, sources []poc.Source, cveIDs []stri
 	return out
 }
 
-func queryPOCsForCVE(ctx context.Context, sources []poc.Source, cveID string) ([]poc.Finding, error) {
+func queryPOCsForCVE(ctx context.Context, sources []poc.Source, cveID string, rateLimitedSources *sync.Map) ([]poc.Finding, error) {
 	results := make(chan pocSourceResult, len(sources))
 	var wg sync.WaitGroup
 
 	for _, source := range sources {
+		if rateLimitedSources != nil {
+			if _, limited := rateLimitedSources.Load(source.Name()); limited {
+				continue
+			}
+		}
 		wg.Add(1)
 		go func(s poc.Source) {
 			defer wg.Done()
 			findings, err := s.Query(ctx, cveID)
+			if err != nil && isRateLimitError(err) && rateLimitedSources != nil {
+				rateLimitedSources.Store(s.Name(), true)
+			}
 			results <- pocSourceResult{name: s.Name(), findings: findings, err: err}
 		}(source)
 	}
@@ -292,13 +307,17 @@ func queryPOCsForCVE(ctx context.Context, sources []poc.Source, cveID string) ([
 	close(results)
 
 	var all []poc.Finding
+	var firstErr error
 	for result := range results {
 		if result.err != nil {
-			return nil, fmt.Errorf("%s: %w", result.name, result.err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: %w", result.name, result.err)
+			}
+			continue
 		}
 		all = append(all, result.findings...)
 	}
-	return all, nil
+	return all, firstErr
 }
 
 func flattenPOCResults(results []pocResult) []poc.Finding {
@@ -319,19 +338,59 @@ func flattenPOCResults(results []pocResult) []poc.Finding {
 }
 
 func printPOCErrors(results []pocResult) {
+	rateLimitPrinted := make(map[string]bool)
 	for _, result := range results {
 		if result.err != nil {
+			if isRateLimitError(result.err) {
+				sourceKey := extractSourceKey(result.err)
+				if !rateLimitPrinted[sourceKey] {
+					rateLimitPrinted[sourceKey] = true
+					warnf("%s: %v (rate limit reached, suppressing further rate-limit warnings)", result.cveID, result.err)
+				}
+				continue
+			}
 			warnf("%s: %v", result.cveID, result.err)
 		}
 	}
 }
 
 func printCVESourceErrors(results []cveSourceResult) {
+	rateLimitPrinted := make(map[string]bool)
 	for _, result := range results {
 		if result.err != nil {
+			if isRateLimitError(result.err) {
+				sourceKey := extractSourceKey(result.err)
+				if !rateLimitPrinted[sourceKey] {
+					rateLimitPrinted[sourceKey] = true
+					warnf("%s: %v (rate limit reached, suppressing further rate-limit warnings)", result.source, result.err)
+				}
+				continue
+			}
 			warnf("%s: %v", result.source, result.err)
 		}
 	}
+}
+
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "429") ||
+		strings.Contains(s, "too many requests") ||
+		strings.Contains(s, "rate limit") ||
+		strings.Contains(s, "ratelimit")
+}
+
+func extractSourceKey(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	parts := strings.SplitN(err.Error(), ":", 2)
+	if len(parts) > 1 {
+		return strings.TrimSpace(parts[0])
+	}
+	return "rate-limit"
 }
 
 func resolveSearchInput(args []string, opts options) (string, string, string, string, error) {
@@ -345,13 +404,16 @@ func resolveSearchInput(args []string, opts options) (string, string, string, st
 		if opts.version != "" {
 			return vendor, strings.Join(tokens, " "), opts.version, ecosystem, nil
 		}
-		if len(tokens) < 2 {
-			return "", "", "", "", fmt.Errorf("--app mode expects version in --version or as the last argument")
+		if len(tokens) >= 2 {
+			app, ver := versioncanon.ExtractAppAndVersion(strings.Join(tokens, " "))
+			if ver != "" {
+				return vendor, app, ver, ecosystem, nil
+			}
+			product := strings.Join(tokens[:len(tokens)-1], " ")
+			version := tokens[len(tokens)-1]
+			return vendor, product, version, ecosystem, nil
 		}
-
-		product := strings.Join(tokens[:len(tokens)-1], " ")
-		version := tokens[len(tokens)-1]
-		return vendor, product, version, ecosystem, nil
+		return "", "", "", "", fmt.Errorf("--app mode expects version in --version or as the last argument")
 	}
 
 	if opts.version != "" {
@@ -365,9 +427,12 @@ func resolveSearchInput(args []string, opts options) (string, string, string, st
 		if len(args) < 1 {
 			return "", "", "", "", fmt.Errorf("search mode expects at least one keyword")
 		}
-		product := strings.Join(args, " ")
-		version := ""
-		return vendor, product, version, ecosystem, nil
+		rawQuery := strings.Join(args, " ")
+		app, ver := versioncanon.ExtractAppAndVersion(rawQuery)
+		if ver != "" {
+			return vendor, app, ver, ecosystem, nil
+		}
+		return vendor, rawQuery, "", ecosystem, nil
 	}
 
 	return "", "", "", "", fmt.Errorf("provide search input via --search <product words...> <version> or --app <name> --version <version>")
@@ -398,7 +463,11 @@ func runPOCSources(ctx context.Context, sources []poc.Source, cveID string) {
 	foundAny := false
 	for result := range results {
 		if result.err != nil {
-			errorf("%s: %v", result.name, result.err)
+			if isRateLimitError(result.err) {
+				errorf("%s: %v (rate limit reached)", result.name, result.err)
+			} else {
+				errorf("%s: %v", result.name, result.err)
+			}
 			continue
 		}
 		if len(result.findings) == 0 {

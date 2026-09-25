@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Fakechippies/pochunter/httpclient"
+	"github.com/Fakechippies/pochunter/versioncanon"
 )
 
 type VulnersSource struct {
@@ -18,6 +19,13 @@ func (o *VulnersSource) Name() string { return "Vulners" }
 func (o *VulnersSource) Query(ctx context.Context, vendor, product, version, ecosystem string) ([]Finding, error) {
 	if o.APIKey == "" {
 		return nil, fmt.Errorf("VULNERS_API_KEY not set")
+	}
+
+	if version == "" {
+		if app, ver := versioncanon.ExtractAppAndVersion(product); ver != "" {
+			product = app
+			version = ver
+		}
 	}
 
 	cpeObj := map[string]interface{}{}

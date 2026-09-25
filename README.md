@@ -8,12 +8,16 @@ CLI tool to discover CVEs and hunt public POCs, free-form search or structured p
 - All CVE sources queried concurrently, results deduplicated
 - POC discovery from **poc-in-github** and **search-vulns** with a configurable worker pool (max 8)
 - Direct POC mode with `--poc` / `-poc`
+- **Version canonicalization** — detects, extracts, and compares software versions (e.g. `7.0`, `8.5p1`, `v1.2.3`)
+- **CPE-based filtering** — NVD checks CPE configurations (version ranges, vendor/product fields) to eliminate false positives
+- **Rate-limit suppression** — duplicate 429 warnings are printed only once per source; rate-limited sources are skipped
 - Version variant matching (example: `2.2.0` can match `v2.2.x`)
 - Selectable CVE sources via `--sources` flag
 - CVSS scoring: free-form search results sorted by score with a SCORE column
 - Terminal width auto-detection (ioctl TIOCGWINSZ) for full-screen table output
 - Word-splitting fallback: if multi-word search returns 0 results, each word is tried individually
 - CVE nickname aliases: common names like `shellshock`, `heartbleed`, `logjam` mapped to their product names
+- Auto-detects version in free-form queries (e.g. `--search curl 7.0` splits into product=`curl`, version=`7.0`)
 - Proper table formatting with word-wrapped DETAIL column
 - Vulners source uses `/api/v4/audit/software` (CPE-based, partial match, extended catalog)
 
@@ -35,12 +39,18 @@ pochunter --search <keywords...>
 
 Dump any keywords: no version required. Results are sorted by CVSS score (highest first) and include a SCORE column. Known CVE nicknames like `shellshock`, `heartbleed`, `logjam`, `spectre`, `meltdown` are automatically mapped to their product names.
 
+**Version auto-detection:** pass the product and version as free-form keywords and POC-Hunter automatically splits them into a structured product/version query.
+
 ```bash
 go run ./cmd/pochunter --search ShellShock
 go run ./cmd/pochunter --search shellshock 4.3 bash
 go run ./cmd/pochunter --search log4j
 go run ./cmd/pochunter --search Krayin CRM 2.20 --vendor Webkul --ecosystem php
 go run ./cmd/pochunter --search django 4.2 --sources nvd,vulners
+# Auto-detects "curl" and "7.0" from free-form input
+go run ./cmd/pochunter --search curl 7.0
+# Also handles prefix words: "curl version 7.0"
+go run ./cmd/pochunter --search curl version 7.0
 ```
 
 ### 2) Structured product/version mode
@@ -90,10 +100,10 @@ go run ./cmd/pochunter -poc CVE 2026 38526
 
 | Flag     | Source            | Auth              | Notes |
 |----------|-------------------|-------------------|-------|
-| `nvd`    | NVD API 2.0       | None              | Keyword search with version-variant fallback filtering. `resultsPerPage=200`. |
-| `circl`  | CIRCL CVE search  | None              | Queries `cve.circl.lu/api/search/{vendor}/{product}`. Falls back to `vendor=product` if vendor is empty. |
+| `nvd`    | NVD API 2.0       | None              | CPE configuration parsing with version range filtering (startInc, endExc, etc.). Product matching via normalized vendor/product fields. False positives prevented (e.g. "curl 7.0" won't match SQL Server 7.0). |
+| `circl`  | CIRCL CVE search  | None              | Queries `cve.circl.lu/api/search/{vendor}/{product}`. Falls back to `vendor=product` if vendor is empty. Auto-extracts version from product string. |
 | `osv`    | OSV.dev           | None              | Package-ecosystem based. **Requires `--ecosystem`**. POSTs version+package to `api.osv.dev/v1/query`. Resolves aliases to CVEs. |
-| `vulners`| Vulners v4 audit  | `VULNERS_API_KEY` | Uses `POST /api/v4/audit/software` with structured CPE objects (`"match": "partial"`, `"catalog": "extended"`). |
+| `vulners`| Vulners v4 audit  | `VULNERS_API_KEY` | Uses `POST /api/v4/audit/software` with structured CPE objects (`"match": "partial"`, `"catalog": "extended"`). Auto-extracts version from product string. |
 | `github` | GitHub Advisories | `GITHUB_TOKEN`    | **Requires `--ecosystem`**. Queries `api.github.com/advisories` with ecosystem+package filter. |
 
 ## Flags
@@ -182,9 +192,32 @@ for _, src := range pocSources {
 }
 ```
 
-Generate version variants for fuzzy matching:
+### Version canonicalization
+
+The `versioncanon` package provides utilities to work with software versions:
 
 ```go
+// Detect if a token is a version (7.0, 8.5p1, v1.2.3)
+versioncanon.IsVersion("7.0") // true
+versioncanon.IsVersion("curl") // false
+
+// Extract product and version from free-form input
+app, ver := versioncanon.ExtractAppAndVersion("curl 7.0")
+// app="curl", ver="7.0"
+
+// Compare versions numerically
+versioncanon.Compare("7.0", "7.0.0") // 0 (equal)
+versioncanon.Compare("7.0", "7.10.7") // -1 (7.0 < 7.10.7)
+
+// Check if version falls within a range
+versioncanon.MatchesRange("7.0", "7.0", "", "", "7.15.0") // true ([7.0, 7.15.0))
+versioncanon.MatchesRange("7.0", "", "", "", "7.10.7") // true (< 7.10.7)
+
+// Boundary-aware version matching in text
+versioncanon.MatchVersionInText("curl 7.0 buffer overflow", "7.0") // true
+versioncanon.MatchVersionInText("curl 7.57.0", "7.0") // false (no false positive)
+
+// Generate variants for fuzzy matching
 variants := versioncanon.Variants("2.2.0")
 // Returns: ["2.2.0", "v2.2.0", "2.2.0.x", "v2.2.0.x", "2.2", "v2.2", "2.2.x", "v2.2.x"]
 ```
@@ -218,10 +251,17 @@ type Finding struct {
 | `cve`          | `github.com/Fakechippies/pochunter/cve`        | Source interface + NVD, CIRCL, OSV, Vulners, GitHub Advisories |
 | `poc`          | `github.com/Fakechippies/pochunter/poc`        | Source interface + poc-in-github, search-vulns |
 | `httpclient`   | `github.com/Fakechippies/pochunter/httpclient` | Shared HTTP/JSON client used by all sources |
-| `versioncanon` | `github.com/Fakechippies/pochunter/versioncanon`| Version variant generation for fuzzy matching |
+| `versioncanon` | `github.com/Fakechippies/pochunter/versioncanon`| Version canonicalization: detection, extraction, comparison, and fuzzy matching |
+
+## Tests
+
+17 unit tests across 3 packages (`versioncanon`, `cve`, `cli`) covering version canonicalization, product/version matching, and CLI search input resolution:
+
+```bash
+go test ./...
+```
 
 ## TODO:
 
 - [ ] Add output formats (JSON/CSV).
 - [ ] Add caching and retry/backoff.
-- [ ] Add unit tests for version canonicalization and source adapters.
