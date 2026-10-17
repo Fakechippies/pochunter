@@ -13,9 +13,9 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/Fakechippies/pochunter/cve"
-	"github.com/Fakechippies/pochunter/poc"
-	"github.com/Fakechippies/pochunter/versioncanon"
+	"github.com/Fakechippies/POC-Hunter/cve"
+	"github.com/Fakechippies/POC-Hunter/poc"
+	"github.com/Fakechippies/POC-Hunter/versioncanon"
 	"github.com/spf13/cobra"
 )
 

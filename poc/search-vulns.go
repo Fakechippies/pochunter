@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Fakechippies/pochunter/httpclient"
+	"github.com/Fakechippies/POC-Hunter/httpclient"
 )
 
 type SearchVulns struct {

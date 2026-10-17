@@ -3,7 +3,7 @@ package poc
 import (
 	"context"
 
-	"github.com/Fakechippies/pochunter/httpclient"
+	"github.com/Fakechippies/POC-Hunter/httpclient"
 )
 
 type POCInGithub struct{}

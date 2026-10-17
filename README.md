@@ -11,7 +11,7 @@ CLI tool to discover CVEs and hunt public POCs, free-form search or structured p
 - **Version canonicalization** — detects, extracts, and compares software versions (e.g. `7.0`, `8.5p1`, `v1.2.3`)
 - **CPE-based filtering** — NVD checks CPE configurations (version ranges, vendor/product fields) to eliminate false positives
 - **Rate-limit suppression** — duplicate 429 warnings are printed only once per source; rate-limited sources are skipped
-- Version variant matching (example: `2.2.0` can match `v2.2.x`)
+- Exact variant matching in descriptions (zero-padding and same-length wildcards) on token boundaries, so `7.0` never matches `7.57.0`
 - Selectable CVE sources via `--sources` flag
 - CVSS scoring: free-form search results sorted by score with a SCORE column
 - Terminal width auto-detection (ioctl TIOCGWINSZ) for full-screen table output
@@ -24,7 +24,7 @@ CLI tool to discover CVEs and hunt public POCs, free-form search or structured p
 ## Install
 
 ```bash
-go install github.com/Fakechippies/pochunter/cmd/pochunter@latest
+go install github.com/Fakechippies/POC-Hunter/cmd/pochunter@latest
 ```
 
 Then run:
@@ -143,10 +143,10 @@ import (
     "context"
     "time"
 
-    "github.com/Fakechippies/pochunter/cve"
-    "github.com/Fakechippies/pochunter/httpclient"
-    "github.com/Fakechippies/pochunter/poc"
-    "github.com/Fakechippies/pochunter/versioncanon"
+    "github.com/Fakechippies/POC-Hunter/cve"
+    "github.com/Fakechippies/POC-Hunter/httpclient"
+    "github.com/Fakechippies/POC-Hunter/poc"
+    "github.com/Fakechippies/POC-Hunter/versioncanon"
 )
 ```
 
@@ -205,21 +205,34 @@ versioncanon.IsVersion("curl") // false
 app, ver := versioncanon.ExtractAppAndVersion("curl 7.0")
 // app="curl", ver="7.0"
 
-// Compare versions numerically
-versioncanon.Compare("7.0", "7.0.0") // 0 (equal)
-versioncanon.Compare("7.0", "7.10.7") // -1 (7.0 < 7.10.7)
+// Compare versions: zero-padding and leading zeros ignored,
+// letter releases (OpenSSL 1.1.1k) and pre-releases (2.0.0-rc1) ordered.
+versioncanon.Compare("7.0", "7.0.0")     // 0 (equal)
+versioncanon.Compare("7.0", "7.10.7")    // -1 (7.0 < 7.10.7)
+versioncanon.Compare("1.1.1", "1.1.1k")  // -1 (letter release comes after)
+versioncanon.Compare("2.0.0-rc1", "2.0.0") // -1 (pre-release comes before)
 
 // Check if version falls within a range
 versioncanon.MatchesRange("7.0", "7.0", "", "", "7.15.0") // true ([7.0, 7.15.0))
-versioncanon.MatchesRange("7.0", "", "", "", "7.10.7") // true (< 7.10.7)
+versioncanon.MatchesRange("1.1.1k", "", "", "", "1.1.1l") // true (< 1.1.1l)
 
-// Boundary-aware version matching in text
+// Boundary-aware version matching in text; occurrences in negating
+// contexts (before/prior to/fixed in/earlier than/<) are skipped
 versioncanon.MatchVersionInText("curl 7.0 buffer overflow", "7.0") // true
+versioncanon.MatchVersionInText("fixed in curl 7.57.0", "7.57.0") // false
 versioncanon.MatchVersionInText("curl 7.57.0", "7.0") // false (no false positive)
 
-// Generate variants for fuzzy matching
-variants := versioncanon.Variants("2.2.0")
-// Returns: ["2.2.0", "v2.2.0", "2.2.0.x", "v2.2.0.x", "2.2", "v2.2", "2.2.x", "v2.2.x"]
+// ExactVariants holds only information-preserving equivalents (zero-padding
+// and same-length wildcards); MatchVersionInText uses these.
+versioncanon.ExactVariants("2.2.0")
+// ["v2.2.0.0", "v2.2.0.x", "2.2.0.0", "2.2.0.x", "v2.2.0", "2.2.0", "v2.2", "2.2"]
+
+// Variants is a superset that also drops non-zero components, for fuzzy/research use.
+versioncanon.Variants("2.2.0") // adds "2.2.x", "2.x", "2", "2.2.*", ...
+
+// MatchVersionInTextAny is the loose counterpart to MatchVersionInText: it also
+// matches coarse/wildcard variants, e.g. "2.2.0" against "v2.2.x".
+versioncanon.MatchVersionInTextAny("an issue in v2.2.x", "2.2.0") // true
 ```
 
 Make raw API calls with the HTTP client:
@@ -248,10 +261,10 @@ type Finding struct {
 
 | Package        | Import path                                    | Description |
 |----------------|------------------------------------------------|-------------|
-| `cve`          | `github.com/Fakechippies/pochunter/cve`        | Source interface + NVD, CIRCL, OSV, Vulners, GitHub Advisories |
-| `poc`          | `github.com/Fakechippies/pochunter/poc`        | Source interface + poc-in-github, search-vulns |
-| `httpclient`   | `github.com/Fakechippies/pochunter/httpclient` | Shared HTTP/JSON client used by all sources |
-| `versioncanon` | `github.com/Fakechippies/pochunter/versioncanon`| Version canonicalization: detection, extraction, comparison, and fuzzy matching |
+| `cve`          | `github.com/Fakechippies/POC-Hunter/cve`        | Source interface + NVD, CIRCL, OSV, Vulners, GitHub Advisories |
+| `poc`          | `github.com/Fakechippies/POC-Hunter/poc`        | Source interface + poc-in-github, search-vulns |
+| `httpclient`   | `github.com/Fakechippies/POC-Hunter/httpclient` | Shared HTTP/JSON client used by all sources |
+| `versioncanon` | `github.com/Fakechippies/POC-Hunter/versioncanon`| Version canonicalization: detection, extraction, comparison, and fuzzy matching |
 
 ## Tests
 

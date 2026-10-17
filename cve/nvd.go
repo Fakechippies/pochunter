@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/Fakechippies/pochunter/httpclient"
-	"github.com/Fakechippies/pochunter/versioncanon"
+	"github.com/Fakechippies/POC-Hunter/httpclient"
+	"github.com/Fakechippies/POC-Hunter/versioncanon"
 )
 
 var cveAliases = map[string]string{
@@ -283,6 +283,11 @@ func matchesProductAndVersion(item nvdItem, productLower, version string) bool {
 							cpeVersionMatched = true
 							break
 						}
+					} else if cpe.startInc == "" && cpe.startExc == "" && cpe.endInc == "" && cpe.endExc == "" {
+						// Wildcard version field with no range bounds asserts
+						// that all versions of the product are vulnerable.
+						cpeVersionMatched = true
+						break
 					}
 				}
 

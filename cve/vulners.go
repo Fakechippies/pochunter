@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Fakechippies/pochunter/httpclient"
-	"github.com/Fakechippies/pochunter/versioncanon"
+	"github.com/Fakechippies/POC-Hunter/httpclient"
+	"github.com/Fakechippies/POC-Hunter/versioncanon"
 )
 
 type VulnersSource struct {
