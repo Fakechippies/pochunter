@@ -2,11 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/Fakechippies/POC-Hunter/cve"
+	"github.com/Fakechippies/POC-Hunter/poc"
 )
 
 func TestResolveSearchInput(t *testing.T) {
@@ -171,5 +175,122 @@ func TestPrintPOCErrors_SuppressesDuplicateRateLimits(t *testing.T) {
 	// Should print the non-rate-limit error normally
 	if !strings.Contains(output, "other-source: connection timeout") {
 		t.Errorf("expected non-rate-limit error to be printed. Output:\n%s", output)
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	fn()
+	_ = w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	_ = r.Close()
+	return buf.String()
+}
+
+func TestSetOutputFormat(t *testing.T) {
+	defer func() { _ = setOutputFormat("table") }()
+	for _, ok := range []string{"", "table", "json", "jsonl", "csv", "JSON"} {
+		if err := setOutputFormat(ok); err != nil {
+			t.Errorf("setOutputFormat(%q) unexpected error: %v", ok, err)
+		}
+	}
+	before := outputFormat
+	if err := setOutputFormat("xml"); err == nil {
+		t.Errorf("setOutputFormat(\"xml\") expected error, got nil")
+	}
+	if outputFormat != before {
+		t.Errorf("failed validation must not change outputFormat, got %q want %q", outputFormat, before)
+	}
+}
+
+func TestEmitStructuredJSON(t *testing.T) {
+	defer func() { _ = setOutputFormat("table") }()
+	if err := setOutputFormat("json"); err != nil {
+		t.Fatal(err)
+	}
+
+	cves := []cve.Finding{{CVE: "CVE-2023-0001", Source: "NVD", Detail: "a bug", Score: 9.8}}
+	pocs := []poc.Finding{{CVE: "CVE-2023-0001", Source: "poc-in-github", Owner: "alice", PushedAt: "2023-01-01", POC: "https://example.com"}}
+
+	out := captureStdout(t, func() {
+		if err := emitStructured("curl 7.0", cves, []string{"CVE-2023-0001"}, pocs); err != nil {
+			t.Fatalf("emitStructured: %v", err)
+		}
+	})
+
+	var report structuredReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("invalid JSON output: %v\n%s", err, out)
+	}
+	if report.Query != "curl 7.0" {
+		t.Errorf("query = %q, want %q", report.Query, "curl 7.0")
+	}
+	if len(report.CVEFindings) != 1 || report.CVEFindings[0].CVE != "CVE-2023-0001" || report.CVEFindings[0].Score != 9.8 {
+		t.Errorf("unexpected cve findings: %+v", report.CVEFindings)
+	}
+	if len(report.POCFindings) != 1 || report.POCFindings[0].Owner != "alice" {
+		t.Errorf("unexpected poc findings: %+v", report.POCFindings)
+	}
+}
+
+func TestEmitStructuredJSONL(t *testing.T) {
+	defer func() { _ = setOutputFormat("table") }()
+	if err := setOutputFormat("jsonl"); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdout(t, func() {
+		_ = emitStructured("q", []cve.Finding{{CVE: "CVE-1", Source: "NVD"}}, nil, []poc.Finding{{CVE: "CVE-1", Owner: "bob"}})
+	})
+
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 JSONL lines, got %d:\n%s", len(lines), out)
+	}
+	for i, line := range lines {
+		var l jsonlLine
+		if err := json.Unmarshal([]byte(line), &l); err != nil {
+			t.Fatalf("line %d invalid JSON: %v", i, err)
+		}
+	}
+}
+
+func TestEmitStructuredCSV(t *testing.T) {
+	defer func() { _ = setOutputFormat("table") }()
+	if err := setOutputFormat("csv"); err != nil {
+		t.Fatal(err)
+	}
+
+	cves := []cve.Finding{{CVE: "CVE-1", Source: "NVD", Detail: "d, with comma", Score: 7.5}}
+	pocs := []poc.Finding{{CVE: "CVE-1", Source: "search-vulns", Owner: "bob", POC: "u"}}
+
+	out := captureStdout(t, func() {
+		_ = emitStructured("q", cves, nil, pocs)
+	})
+
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected header + 2 rows, got %d:\n%s", len(lines), out)
+	}
+	if lines[0] != "type,cve,source,detail,score,owner,pushed_at,poc" {
+		t.Errorf("unexpected header: %q", lines[0])
+	}
+	if !strings.HasPrefix(lines[1], "cve,CVE-1,NVD,") {
+		t.Errorf("unexpected cve row: %q", lines[1])
+	}
+	if !strings.HasPrefix(lines[2], "poc,CVE-1,search-vulns,") {
+		t.Errorf("unexpected poc row: %q", lines[2])
+	}
+	if !strings.Contains(lines[1], `"d, with comma"`) {
+		t.Errorf("expected comma-containing detail to be quoted, got: %q", lines[1])
 	}
 }

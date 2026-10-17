@@ -2,7 +2,10 @@ package cli
 
 import (
 	"context"
+	"encoding/csv"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -35,6 +38,7 @@ type options struct {
 	version    string
 	ecosystem  string
 	sources    []string
+	output     string
 	timeout    time.Duration
 }
 
@@ -57,6 +61,7 @@ func Execute() error {
 	rootCmd.Flags().StringVar(&opts.version, "version", "", "application version")
 	rootCmd.Flags().StringVar(&opts.ecosystem, "ecosystem", "", "package ecosystem (for sources that use it)")
 	rootCmd.Flags().StringSliceVar(&opts.sources, "sources", nil, "CVE sources to use (comma-separated: nvd,circl,osv,vulners,github)")
+	rootCmd.Flags().StringVarP(&opts.output, "output", "o", "table", "output format: table, json, jsonl, csv")
 	rootCmd.Flags().DurationVar(&opts.timeout, "timeout", 30*time.Second, "request timeout")
 
 	rootCmd.SetArgs(normalizeCompatFlags(os.Args[1:]))
@@ -79,6 +84,10 @@ func normalizeCompatFlags(args []string) []string {
 }
 
 func run(args []string, opts options) error {
+	if err := setOutputFormat(opts.output); err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 	defer cancel()
 
@@ -91,7 +100,15 @@ func run(args []string, opts options) error {
 		}
 		cveID := normalizeCVE(args)
 		progressf("POC mode enabled for %s", cveID)
-		runPOCSources(ctx, pocSources, cveID)
+		pocs := runPOCSources(ctx, pocSources, cveID)
+		if isStructured() {
+			return emitStructured(cveID, nil, nil, pocs)
+		}
+		if len(pocs) == 0 {
+			warnf("%s: no POCs found", cveID)
+			return nil
+		}
+		printPOCFindings("POC Discovery", pocs)
 		return nil
 	}
 
@@ -114,25 +131,37 @@ func run(args []string, opts options) error {
 
 	cveResults := collectCVEs(ctx, cveSources, vendor, product, version, ecosystem)
 	allCVEFindings, uniqueCVEs := dedupeCVEs(cveResults)
-	if len(allCVEFindings) == 0 {
-		printCVESourceErrors(cveResults)
-		warnf("No CVEs found for query")
-		return nil
-	}
 
 	if isFreeForm {
 		sort.SliceStable(allCVEFindings, func(i, j int) bool {
 			return allCVEFindings[i].Score > allCVEFindings[j].Score
 		})
 	}
-	printCVEFindings("CVE Discovery", allCVEFindings, isFreeForm)
-	successf("Unique CVEs: %d", len(uniqueCVEs))
+
+	if len(allCVEFindings) == 0 {
+		printCVESourceErrors(cveResults)
+		if isStructured() {
+			return emitStructured(rawQuery, allCVEFindings, uniqueCVEs, nil)
+		}
+		warnf("No CVEs found for query")
+		return nil
+	}
+
+	if !isStructured() {
+		printCVEFindings("CVE Discovery", allCVEFindings, isFreeForm)
+		successf("Unique CVEs: %d", len(uniqueCVEs))
+	}
 	printCVESourceErrors(cveResults)
 
 	progressf("Searching POCs for %d CVEs", len(uniqueCVEs))
 	pocResults := collectPOCsForCVEs(ctx, pocSources, uniqueCVEs)
 	printPOCErrors(pocResults)
 	allPOCs := flattenPOCResults(pocResults)
+
+	if isStructured() {
+		return emitStructured(rawQuery, allCVEFindings, uniqueCVEs, allPOCs)
+	}
+
 	if len(allPOCs) == 0 {
 		warnf("No POCs found across discovered CVEs")
 		return nil
@@ -156,9 +185,9 @@ type pocResult struct {
 
 func buildCVESourcesFromEnv(want []string) []cve.Source {
 	all := map[string]cve.Source{
-		"nvd":    cve.NVDSource{},
-		"circl":  cve.CIRCLSource{},
-		"osv":    cve.OSVSource{},
+		"nvd":     cve.NVDSource{},
+		"circl":   cve.CIRCLSource{},
+		"osv":     cve.OSVSource{},
 		"vulners": nil,
 		"github":  nil,
 	}
@@ -325,6 +354,10 @@ func flattenPOCResults(results []pocResult) []poc.Finding {
 	for _, result := range results {
 		all = append(all, result.findings...)
 	}
+	return sortPOCFindings(all)
+}
+
+func sortPOCFindings(all []poc.Finding) []poc.Finding {
 	sort.Slice(all, func(i, j int) bool {
 		if all[i].CVE == all[j].CVE {
 			if all[i].Owner == all[j].Owner {
@@ -444,7 +477,7 @@ type pocSourceResult struct {
 	err      error
 }
 
-func runPOCSources(ctx context.Context, sources []poc.Source, cveID string) {
+func runPOCSources(ctx context.Context, sources []poc.Source, cveID string) []poc.Finding {
 	results := make(chan pocSourceResult, len(sources))
 	var wg sync.WaitGroup
 
@@ -460,7 +493,7 @@ func runPOCSources(ctx context.Context, sources []poc.Source, cveID string) {
 	wg.Wait()
 	close(results)
 
-	foundAny := false
+	var all []poc.Finding
 	for result := range results {
 		if result.err != nil {
 			if isRateLimitError(result.err) {
@@ -470,15 +503,14 @@ func runPOCSources(ctx context.Context, sources []poc.Source, cveID string) {
 			}
 			continue
 		}
-		if len(result.findings) == 0 {
-			continue
+		for i := range result.findings {
+			if result.findings[i].Source == "" {
+				result.findings[i].Source = result.name
+			}
 		}
-		foundAny = true
-		printPOCFindings(result.name, result.findings)
+		all = append(all, result.findings...)
 	}
-	if !foundAny {
-		warnf("%s: no POCs found", cveID)
-	}
+	return sortPOCFindings(all)
 }
 
 func normalizeCVE(args []string) string {
@@ -573,20 +605,49 @@ func printPOCFindings(source string, findings []poc.Finding) {
 	_ = w.Flush()
 }
 
+// outputFormat selects how results are rendered: "table" (default, human
+// readable) or a machine-readable format ("json", "jsonl", "csv").
+var outputFormat = "table"
+
+func setOutputFormat(name string) error {
+	f := strings.ToLower(strings.TrimSpace(name))
+	if f == "" {
+		f = "table"
+	}
+	switch f {
+	case "table", "json", "jsonl", "csv":
+		outputFormat = f
+		return nil
+	default:
+		return fmt.Errorf("unsupported --output %q (supported: table, json, jsonl, csv)", name)
+	}
+}
+
+func isStructured() bool { return outputFormat != "table" }
+
+// diagWriter routes progress/status messages. In structured mode they go to
+// stderr so stdout stays a clean, parseable document.
+func diagWriter() io.Writer {
+	if isStructured() {
+		return os.Stderr
+	}
+	return os.Stdout
+}
+
 func progressf(format string, args ...interface{}) {
-	fmt.Printf("%s[*]%s %s\n", colorCyan, colorReset, fmt.Sprintf(format, args...))
+	fmt.Fprintf(diagWriter(), "%s[*]%s %s\n", colorCyan, colorReset, fmt.Sprintf(format, args...))
 }
 
 func successf(format string, args ...interface{}) {
-	fmt.Printf("%s[+]%s %s\n", colorGreen, colorReset, fmt.Sprintf(format, args...))
+	fmt.Fprintf(diagWriter(), "%s[+]%s %s\n", colorGreen, colorReset, fmt.Sprintf(format, args...))
 }
 
 func warnf(format string, args ...interface{}) {
-	fmt.Printf("%s[-]%s %s\n", colorYellow, colorReset, fmt.Sprintf(format, args...))
+	fmt.Fprintf(diagWriter(), "%s[-]%s %s\n", colorYellow, colorReset, fmt.Sprintf(format, args...))
 }
 
 func errorf(format string, args ...interface{}) {
-	fmt.Printf("%s[!]%s %s\n", colorRed, colorReset, fmt.Sprintf(format, args...))
+	fmt.Fprintf(diagWriter(), "%s[!]%s %s\n", colorRed, colorReset, fmt.Sprintf(format, args...))
 }
 
 type winsize struct {
@@ -631,4 +692,113 @@ func wrapText(s string, width int) []string {
 		return []string{""}
 	}
 	return lines
+}
+
+type cveRecord struct {
+	CVE    string  `json:"cve"`
+	Source string  `json:"source"`
+	Detail string  `json:"detail"`
+	Score  float64 `json:"score"`
+}
+
+type pocRecord struct {
+	CVE      string `json:"cve"`
+	Source   string `json:"source"`
+	Owner    string `json:"owner"`
+	PushedAt string `json:"pushed_at"`
+	POC      string `json:"poc"`
+}
+
+type structuredReport struct {
+	Query       string      `json:"query,omitempty"`
+	CVEFindings []cveRecord `json:"cve_findings"`
+	UniqueCVEs  []string    `json:"unique_cves"`
+	POCFindings []pocRecord `json:"poc_findings"`
+}
+
+type jsonlLine struct {
+	Type     string  `json:"type"`
+	CVE      string  `json:"cve"`
+	Source   string  `json:"source"`
+	Detail   string  `json:"detail,omitempty"`
+	Score    float64 `json:"score,omitempty"`
+	Owner    string  `json:"owner,omitempty"`
+	PushedAt string  `json:"pushed_at,omitempty"`
+	POC      string  `json:"poc,omitempty"`
+}
+
+func toCVERecords(findings []cve.Finding) []cveRecord {
+	out := make([]cveRecord, 0, len(findings))
+	for _, f := range findings {
+		out = append(out, cveRecord{CVE: f.CVE, Source: f.Source, Detail: f.Detail, Score: f.Score})
+	}
+	return out
+}
+
+func toPOCRecords(findings []poc.Finding) []pocRecord {
+	out := make([]pocRecord, 0, len(findings))
+	for _, f := range findings {
+		out = append(out, pocRecord{CVE: f.CVE, Source: f.Source, Owner: f.Owner, PushedAt: f.PushedAt, POC: f.POC})
+	}
+	return out
+}
+
+// emitStructured writes collected CVE/POC findings to stdout in the format
+// selected by --output. It is a no-op in table mode.
+func emitStructured(query string, cves []cve.Finding, uniqueCVEs []string, pocs []poc.Finding) error {
+	switch outputFormat {
+	case "json":
+		if uniqueCVEs == nil {
+			uniqueCVEs = []string{}
+		}
+		report := structuredReport{
+			Query:       query,
+			CVEFindings: toCVERecords(cves),
+			UniqueCVEs:  uniqueCVEs,
+			POCFindings: toPOCRecords(pocs),
+		}
+		b, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stdout, string(b))
+		return nil
+
+	case "jsonl":
+		enc := json.NewEncoder(os.Stdout)
+		for _, f := range cves {
+			line := jsonlLine{Type: "cve", CVE: f.CVE, Source: f.Source, Detail: f.Detail, Score: f.Score}
+			if err := enc.Encode(line); err != nil {
+				return err
+			}
+		}
+		for _, f := range pocs {
+			line := jsonlLine{Type: "poc", CVE: f.CVE, Source: f.Source, Owner: f.Owner, PushedAt: f.PushedAt, POC: f.POC}
+			if err := enc.Encode(line); err != nil {
+				return err
+			}
+		}
+		return nil
+
+	case "csv":
+		w := csv.NewWriter(os.Stdout)
+		defer w.Flush()
+		if err := w.Write([]string{"type", "cve", "source", "detail", "score", "owner", "pushed_at", "poc"}); err != nil {
+			return err
+		}
+		for _, f := range cves {
+			row := []string{"cve", f.CVE, f.Source, f.Detail, strconv.FormatFloat(f.Score, 'f', -1, 64), "", "", ""}
+			if err := w.Write(row); err != nil {
+				return err
+			}
+		}
+		for _, f := range pocs {
+			row := []string{"poc", f.CVE, f.Source, "", "", f.Owner, f.PushedAt, f.POC}
+			if err := w.Write(row); err != nil {
+				return err
+			}
+		}
+		return w.Error()
+	}
+	return nil
 }

@@ -117,7 +117,24 @@ go run ./cmd/pochunter -poc CVE 2026 38526
 | `--vendor`       | Vendor name (search hint)                        |
 | `--ecosystem`    | Package ecosystem (`npm`, `pypi`, `go`, `maven`, `rubygems`, etc.) |
 | `--sources`      | Comma-separated CVE sources to query             |
+| `--output` / `-o`| Output format: `table` (default), `json`, `jsonl`, `csv` |
 | `--timeout`      | Request timeout (default 30s)                    |
+
+## Output formats
+
+`--output` (`-o`) selects the result format. `table` is the default human-readable
+output. The machine-readable formats write results to **stdout** and route progress
+and error messages to **stderr**, so output can be piped straight into `jq` or a file:
+
+```bash
+pochunter --search curl 7.0 --output json | jq '.cve_findings[].cve'
+pochunter --search log4j -o jsonl > results.jsonl
+pochunter --app django --version 3.2 --ecosystem PyPI -o csv > django.csv
+```
+
+- `json` — a single object with `query`, `cve_findings`, `unique_cves`, and `poc_findings` arrays.
+- `jsonl` — newline-delimited records, each with a `type` of `cve` or `poc`.
+- `csv` — one row per finding with columns `type,cve,source,detail,score,owner,pushed_at,poc` (unused columns are left empty).
 
 ## CVE discovery 
 
@@ -268,7 +285,7 @@ type Finding struct {
 
 ## Tests
 
-17 unit tests across 3 packages (`versioncanon`, `cve`, `cli`) covering version canonicalization, product/version matching, and CLI search input resolution:
+19 unit tests across 3 packages (`versioncanon`, `cve`, `cli`) covering version canonicalization, product/version matching, CLI search input resolution, and structured output formats:
 
 ```bash
 go test ./...
@@ -276,5 +293,6 @@ go test ./...
 
 ## TODO:
 
-- [ ] Add output formats (JSON/CSV).
+- [ ] Make the default `table` output prettier (better alignment, spacing, and colors).
+- [ ] Plain formatting when piping: detect non-TTY stdout and drop ANSI colors and terminal-width-dependent wrapping, so redirected/piped `table` output stays stable and readable.
 - [ ] Add caching and retry/backoff.
