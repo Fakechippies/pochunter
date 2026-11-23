@@ -3,10 +3,10 @@ package cli
 import (
 	"context"
 	"fmt"
-
 	"strings"
 	"time"
 
+	"github.com/Fakechippies/POC-Hunter/cpe"
 	"github.com/Fakechippies/POC-Hunter/db"
 	"github.com/Fakechippies/POC-Hunter/poc"
 	"github.com/spf13/cobra"
@@ -32,6 +32,16 @@ func updatableSources(cacheDB *db.DB) map[string]func(ctx context.Context) (int,
 				ids = append(ids, e.CVE...)
 			}
 			return cacheDB.CVEKEVMark(ids, time.Now())
+		},
+		"cpes": func(ctx context.Context) (int, error) {
+			entries, err := cpe.FetchDictionary(ctx)
+			if err != nil {
+				return 0, err
+			}
+			if err := cacheDB.StoreCPEs(entries); err != nil {
+				return 0, err
+			}
+			return len(entries), cacheDB.CPEMarkRefreshed(time.Now())
 		},
 	}
 	return updaters

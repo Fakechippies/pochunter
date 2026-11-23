@@ -45,12 +45,12 @@ func TestMatchesProductAndVersion(t *testing.T) {
 	}
 
 	// Should match curl 7.0
-	if !matchesProductAndVersion(curlCVE, "curl", "7.0") {
+	if matchNVDItemReason(curlCVE, "curl", "7.0") == "" {
 		t.Errorf("curlCVE should match curl 7.0")
 	}
 
 	// Should not match curl 8.0
-	if matchesProductAndVersion(curlCVE, "curl", "8.0") {
+	if matchNVDItemReason(curlCVE, "curl", "8.0") != "" {
 		t.Errorf("curlCVE should not match curl 8.0")
 	}
 
@@ -67,7 +67,7 @@ func TestMatchesProductAndVersion(t *testing.T) {
 	}
 
 	// Should NOT match curl 7.0
-	if matchesProductAndVersion(sqlServerCVE, "curl", "7.0") {
+	if matchNVDItemReason(sqlServerCVE, "curl", "7.0") != "" {
 		t.Errorf("sqlServerCVE should not match curl 7.0")
 	}
 
@@ -84,7 +84,7 @@ func TestMatchesProductAndVersion(t *testing.T) {
 	}
 
 	// Should NOT match curl 7.0
-	if matchesProductAndVersion(crestronCVE, "curl", "7.0") {
+	if matchNVDItemReason(crestronCVE, "curl", "7.0") != "" {
 		t.Errorf("crestronCVE should not match curl 7.0")
 	}
 }

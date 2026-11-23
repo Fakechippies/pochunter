@@ -26,6 +26,11 @@ type DB struct {
 	sql        *sql.DB
 	writeMu    sync.Mutex
 	appVersion string
+
+	// dictionary memoization (CPEEntriesCached)
+	dictOnce    sync.Once
+	dictEntries []CPEEntry
+	dictErr     error
 }
 
 const schema = `
@@ -85,6 +90,17 @@ CREATE TABLE IF NOT EXISTS meta(
 	key   TEXT PRIMARY KEY,
 	value TEXT NOT NULL
 );
+
+-- CPE dictionary, deduplicated to one row per product prefix. Built from
+-- the NVD CPE API (or its mirror); powers query-to-CPE resolution.
+CREATE TABLE IF NOT EXISTS cpes(
+	prefix   TEXT PRIMARY KEY,
+	vendor   TEXT NOT NULL,
+	product  TEXT NOT NULL,
+	title    TEXT NOT NULL DEFAULT '',
+	versions INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_cpes_product ON cpes(product);
 `
 
 // Open creates (if necessary) and opens the cache database at path, applies

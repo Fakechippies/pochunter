@@ -279,7 +279,7 @@ func TestEmitStructuredCSV(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("expected header + 2 rows, got %d:\n%s", len(lines), out)
 	}
-	if lines[0] != "type,cve,source,detail,score,owner,pushed_at,poc" {
+	if lines[0] != "type,cve,source,detail,score,owner,pushed_at,poc,match" {
 		t.Errorf("unexpected header: %q", lines[0])
 	}
 	if !strings.HasPrefix(lines[1], "cve,CVE-1,NVD,") {

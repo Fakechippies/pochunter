@@ -110,7 +110,7 @@ func run(args []string, opts options) error {
 		defer cacheDB.Close()
 	}
 
-	cveSources := buildCVESourcesFromEnv(opts.sources)
+	cveSources := buildCVESourcesFromEnv(opts.sources, cacheDB)
 	pocSources := buildPOCSources(cacheDB, opts.cacheTTL)
 
 	if opts.pocMode {
@@ -207,9 +207,9 @@ type pocResult struct {
 	err      error
 }
 
-func buildCVESourcesFromEnv(want []string) []cve.Source {
+func buildCVESourcesFromEnv(want []string, cacheDB *db.DB) []cve.Source {
 	all := map[string]cve.Source{
-		"nvd":     cve.NVDSource{},
+		"nvd":     cve.NVDSource{DB: cacheDB},
 		"circl":   cve.CIRCLSource{},
 		"osv":     cve.OSVSource{},
 		"vulners": nil,
@@ -940,6 +940,7 @@ type cveRecord struct {
 	Source string  `json:"source"`
 	Detail string  `json:"detail"`
 	Score  float64 `json:"score"`
+	Reason string  `json:"match,omitempty"`
 }
 
 type pocRecord struct {
@@ -966,12 +967,13 @@ type jsonlLine struct {
 	Owner    string  `json:"owner,omitempty"`
 	PushedAt string  `json:"pushed_at,omitempty"`
 	POC      string  `json:"poc,omitempty"`
+	Reason   string  `json:"match,omitempty"`
 }
 
 func toCVERecords(findings []cve.Finding) []cveRecord {
 	out := make([]cveRecord, 0, len(findings))
 	for _, f := range findings {
-		out = append(out, cveRecord{CVE: f.CVE, Source: f.Source, Detail: f.Detail, Score: f.Score})
+		out = append(out, cveRecord{CVE: f.CVE, Source: f.Source, Detail: f.Detail, Score: f.Score, Reason: f.Reason})
 	}
 	return out
 }
@@ -1008,7 +1010,7 @@ func emitStructured(query string, cves []cve.Finding, uniqueCVEs []string, pocs 
 	case "jsonl":
 		enc := json.NewEncoder(os.Stdout)
 		for _, f := range cves {
-			line := jsonlLine{Type: "cve", CVE: f.CVE, Source: f.Source, Detail: f.Detail, Score: f.Score}
+			line := jsonlLine{Type: "cve", CVE: f.CVE, Source: f.Source, Detail: f.Detail, Score: f.Score, Reason: f.Reason}
 			if err := enc.Encode(line); err != nil {
 				return err
 			}
@@ -1024,11 +1026,11 @@ func emitStructured(query string, cves []cve.Finding, uniqueCVEs []string, pocs 
 	case "csv":
 		w := csv.NewWriter(os.Stdout)
 		defer w.Flush()
-		if err := w.Write([]string{"type", "cve", "source", "detail", "score", "owner", "pushed_at", "poc"}); err != nil {
+		if err := w.Write([]string{"type", "cve", "source", "detail", "score", "owner", "pushed_at", "poc", "match"}); err != nil {
 			return err
 		}
 		for _, f := range cves {
-			row := []string{"cve", f.CVE, f.Source, f.Detail, strconv.FormatFloat(f.Score, 'f', -1, 64), "", "", ""}
+			row := []string{"cve", f.CVE, f.Source, f.Detail, strconv.FormatFloat(f.Score, 'f', -1, 64), "", "", "", f.Reason}
 			if err := w.Write(row); err != nil {
 				return err
 			}

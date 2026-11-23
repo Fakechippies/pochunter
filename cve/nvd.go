@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 
+	"github.com/Fakechippies/POC-Hunter/cpe"
+	"github.com/Fakechippies/POC-Hunter/db"
 	"github.com/Fakechippies/POC-Hunter/httpclient"
 	"github.com/Fakechippies/POC-Hunter/versioncanon"
 )
@@ -21,7 +24,11 @@ var cveAliases = map[string]string{
 	"freak":      "openssl",
 }
 
-type NVDSource struct{}
+type NVDSource struct {
+	// DB optionally holds the cache database, used for query-to-CPE
+	// resolution via the local CPE dictionary (`pochunter update cpes`).
+	DB *db.DB
+}
 
 func (o NVDSource) Name() string { return "NVD" }
 
@@ -57,6 +64,20 @@ func (o NVDSource) Query(ctx context.Context, vendor, product, version, ecosyste
 }
 
 func (o NVDSource) queryByProductAndVersion(ctx context.Context, product, version string) ([]Finding, error) {
+	// 0. Preferred path: resolve the query to a CPE via the local dictionary
+	// and query NVD by exact CPE name. This avoids keyword false positives
+	// entirely; the keyword path below remains as fallback.
+	if o.DB != nil {
+		if cpeName, ok := o.resolveCPE(product, version); ok {
+			items, err := o.queryRawNVDByCPE(ctx, cpeName)
+			if err == nil {
+				if filtered := filterNVDItems(items, product, version); len(filtered) > 0 {
+					return filtered, nil
+				}
+			}
+		}
+	}
+
 	// 1. Query NVD for the product to retrieve candidate CVEs with full CPE metadata
 	items, err := o.queryRawNVD(ctx, product)
 	if err != nil {
@@ -133,10 +154,69 @@ func (o NVDSource) freeFormQuery(ctx context.Context, keyword string) ([]Finding
 	return findings, nil
 }
 
-func (o NVDSource) queryRawNVD(ctx context.Context, keyword string) ([]nvdItem, error) {
-	URL := fmt.Sprintf("https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=%s&resultsPerPage=200",
-		url.QueryEscape(strings.TrimSpace(keyword)),
+// resolveCPE resolves a product/version query to a full CPE 2.3 name via the
+// local dictionary. Best effort: any error or a sub-threshold match yields
+// ok=false and the keyword path is used instead.
+func (o NVDSource) resolveCPE(product, version string) (string, bool) {
+	rows, err := o.DB.CPEEntriesCached()
+	if err != nil || len(rows) == 0 {
+		return "", false
+	}
+	entries := cpe.LoadEntries(rows)
+	query := strings.TrimSpace(product + " " + version)
+	name, _, _, ok := cpe.ResolveApp(query, entries)
+	return name, ok
+}
+
+// nvdAPIBase returns the base URL and headers for the NVD API 2.0. The
+// VulnCheck mirror (same schema, higher rate limits, NVD++ enrichment) is
+// preferred when a token is configured.
+func nvdAPIBase() (string, map[string]string) {
+	if token := strings.TrimSpace(os.Getenv("VULNCHECK_API_TOKEN")); token != "" {
+		return "https://api.vulncheck.com/rest", map[string]string{
+			"Authorization": "Bearer " + token,
+			"Accept":        "application/json",
+		}
+	}
+	if token := strings.TrimSpace(os.Getenv("VULNCHECK_API_KEY")); token != "" {
+		return "https://api.vulncheck.com/rest", map[string]string{
+			"Authorization": "Bearer " + token,
+			"Accept":        "application/json",
+		}
+	}
+	headers := map[string]string{"Accept": "application/json"}
+	if key := strings.TrimSpace(os.Getenv("NVD_API_KEY")); key != "" {
+		headers["apiKey"] = key
+	}
+	return "https://services.nvd.nist.gov/rest", headers
+}
+
+// queryRawNVDByCPE queries NVD by exact CPE name: with a version the cpeName
+// parameter selects that version, without one virtualMatchString selects all
+// versions of the product.
+func (o NVDSource) queryRawNVDByCPE(ctx context.Context, cpeName string) ([]nvdItem, error) {
+	base, headers := nvdAPIBase()
+	param := "cpeName"
+	if parts := strings.Split(cpeName, ":"); len(parts) > 5 && (parts[5] == "*" || parts[5] == "-") {
+		param = "virtualMatchString"
+	}
+	URL := fmt.Sprintf("%s/json/cves/2.0?%s=%s&resultsPerPage=200",
+		base, param, url.QueryEscape(cpeName),
 	)
+	return o.parseNVDResponse(ctx, URL, headers)
+}
+
+func (o NVDSource) queryRawNVD(ctx context.Context, keyword string) ([]nvdItem, error) {
+	base, headers := nvdAPIBase()
+	URL := fmt.Sprintf("%s/json/cves/2.0?keywordSearch=%s&resultsPerPage=200",
+		base, url.QueryEscape(strings.TrimSpace(keyword)),
+	)
+	return o.parseNVDResponse(ctx, URL, headers)
+}
+
+// parseNVDResponse fetches an NVD API 2.0 /cves response and reduces it to
+// items with descriptions, scores and vulnerable CPE configurations.
+func (o NVDSource) parseNVDResponse(ctx context.Context, URL string, headers map[string]string) ([]nvdItem, error) {
 	var nvdResp struct {
 		Vulnerabilities []struct {
 			CVE struct {
@@ -178,7 +258,7 @@ func (o NVDSource) queryRawNVD(ctx context.Context, keyword string) ([]nvdItem, 
 		} `json:"vulnerabilities"`
 	}
 
-	err := httpclient.JSON(ctx, "GET", URL, nil, nil, &nvdResp)
+	err := httpclient.JSON(ctx, "GET", URL, headers, nil, &nvdResp)
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +325,8 @@ func filterNVDItems(items []nvdItem, product, version string) []Finding {
 	var findings []Finding
 
 	for _, item := range items {
-		if !matchesProductAndVersion(item, productLower, version) {
+		reason := matchNVDItemReason(item, productLower, version)
+		if reason == "" {
 			continue
 		}
 		findings = append(findings, Finding{
@@ -253,13 +334,17 @@ func filterNVDItems(items []nvdItem, product, version string) []Finding {
 			Source: "NVD",
 			Detail: item.detail,
 			Score:  item.score,
+			Reason: reason,
 		})
 	}
 
 	return findings
 }
 
-func matchesProductAndVersion(item nvdItem, productLower, version string) bool {
+// matchNVDItemReason reports why ("" = why not) an item matches the queried
+// product/version: cpe_version, version_in_range, cpe_wildcard, cpe_product
+// (version-less query) or description.
+func matchNVDItemReason(item nvdItem, productLower, version string) string {
 	hasCPE := len(item.cpes) > 0
 	cpeProductMatched := false
 	cpeVersionMatched := false
@@ -272,7 +357,7 @@ func matchesProductAndVersion(item nvdItem, productLower, version string) bool {
 			if isProductMatch(cpeProd, productLower) {
 				cpeProductMatched = true
 				if version == "" {
-					return true
+					return "cpe_product"
 				}
 
 				// Check exact or variant version in criteria
@@ -303,25 +388,28 @@ func matchesProductAndVersion(item nvdItem, productLower, version string) bool {
 	}
 
 	if cpeVersionMatched {
-		return true
+		return "cpe_version"
 	}
 
 	// If CPEs exist but none matched the product, this CVE is for another software
 	if hasCPE && !cpeProductMatched {
-		return false
+		return ""
 	}
 
 	// Description fallback: verify product and version match in description
 	descLower := strings.ToLower(item.detail)
 	if !containsWord(descLower, productLower) && !containsWord(descLower, "lib"+productLower) {
-		return false
+		return ""
 	}
 
 	if version != "" {
-		return versioncanon.MatchVersionInText(item.detail, version)
+		if versioncanon.MatchVersionInText(item.detail, version) {
+			return "description"
+		}
+		return ""
 	}
 
-	return true
+	return "description"
 }
 
 func isProductMatch(cpeProd, userProd string) bool {

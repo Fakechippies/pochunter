@@ -466,6 +466,9 @@ func tokenizeRuns(s string) []vseg {
 
 // parseVersionTokens splits a version into its release components and its
 // pre-release components (everything after the first '-', e.g. "-rc1").
+// CPE-style update sections ("2.0-u1559", "2.0:update1559") are post-release,
+// not pre-release: when the section after '-' starts with an update/patch
+// marker it is folded into the release tokens instead.
 func parseVersionTokens(v string) (rel, pre []vseg) {
 	v = Normalize(v)
 	if i := strings.IndexByte(v, '-'); i >= 0 {
@@ -473,6 +476,10 @@ func parseVersionTokens(v string) (rel, pre []vseg) {
 		v = v[:i]
 	}
 	rel = tokenizeRuns(v)
+	if len(pre) > 0 && !pre[0].isNum && normalizeSegText(pre[0].text) == "u" {
+		rel = append(rel, pre...)
+		pre = nil
+	}
 	return rel, pre
 }
 
@@ -485,8 +492,26 @@ func segAt(segs []vseg, i int) vseg {
 	return zero
 }
 
+// normalizeSegText folds equivalent textual version markers: alpha/beta
+// abbreviations ("a"/"alpha", "b"/"beta") and update/patch separators
+// ("u"/"update", "p"/"patch") compare equal, mirroring CPE practice
+// (e.g. cpe 2.0:update1559 vs 2.0-u1559).
+func normalizeSegText(s string) string {
+	switch strings.ToLower(s) {
+	case "alpha":
+		return "a"
+	case "beta":
+		return "b"
+	case "update", "u", "patch", "p":
+		return "u"
+	default:
+		return strings.ToLower(s)
+	}
+}
+
 // compareSegs compares two token lists element-wise. Numeric < alphabetic at
 // the same position, so letter releases (1.1.1k) sort after the bare number.
+// Textual segments compare after normalization (alpha==a, u==update).
 func compareSegs(a, b []vseg) int {
 	for i := 0; i < len(a) || i < len(b); i++ {
 		sa, sb := segAt(a, i), segAt(b, i)
@@ -503,10 +528,11 @@ func compareSegs(a, b []vseg) int {
 		case !sa.isNum && sb.isNum:
 			return 1
 		default:
-			if sa.text < sb.text {
+			na, nb := normalizeSegText(sa.text), normalizeSegText(sb.text)
+			if na < nb {
 				return -1
 			}
-			if sa.text > sb.text {
+			if na > nb {
 				return 1
 			}
 		}

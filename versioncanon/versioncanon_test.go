@@ -279,3 +279,25 @@ func TestMatchesRange(t *testing.T) {
 		t.Errorf("empty version should match anything")
 	}
 }
+
+func TestCompareCPESeparators(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"2.0-update1559", "2.0-u1559", 0},
+		{"20.0:update1559", "20.0-update1559", 0},
+		{"20.0-update1559", "20.0", 1}, // update sorts after the release
+		{"1.2patch3", "1.2p3", 0},
+		{"7.0alpha1", "7.0a1", 0},
+		{"1.0beta2", "1.0b2", 0},
+		{"1.1.1k", "1.1.1", 1}, // letter release still after bare number
+		{"8.5p1", "8.5", 1},
+		{"2.0-rc1", "2.0", -1}, // pre-release still before release
+	}
+	for _, c := range cases {
+		if got := Compare(c.a, c.b); got != c.want {
+			t.Errorf("Compare(%q, %q) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
