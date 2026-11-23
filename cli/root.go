@@ -275,13 +275,20 @@ func buildPOCSources(cacheDB *db.DB, ttl time.Duration) []poc.Source {
 	}
 	if cacheDB != nil {
 		// Bulk-index sources are backed by the cache database.
-		sources = append(sources, &poc.ExploitDB{DB: cacheDB})
+		sources = append(sources,
+			poc.NewExploitDB(cacheDB),
+			poc.NewTrickest(cacheDB),
+			poc.NewMetasploit(cacheDB),
+			poc.NewNuclei(cacheDB),
+			poc.NewTg12(cacheDB),
+			poc.NewAwesomeCVEPOC(cacheDB),
+		)
 	}
 	if cacheDB != nil && ttl > 0 {
 		for i, s := range sources {
 			// Bulk-index sources manage their own freshness via the
 			// upstream revision; only wrap plain API sources.
-			if _, ok := s.(*poc.ExploitDB); ok {
+			if _, ok := s.(poc.ForceUpdater); ok {
 				continue
 			}
 			sources[i] = poc.CachedSource{Inner: s, DB: cacheDB, TTL: ttl}

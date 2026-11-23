@@ -15,14 +15,19 @@ import (
 // updatableSources maps bulk-index source names to a forced refresh. Each
 // updater wipes its cached snapshot and rebuilds it from upstream.
 func updatableSources(cacheDB *db.DB) map[string]func(ctx context.Context) (int, error) {
-	return map[string]func(ctx context.Context) (int, error){
-		"exploitdb": func(ctx context.Context) (int, error) {
-			if err := cacheDB.WipeIndex("exploitdb"); err != nil {
-				return 0, err
-			}
-			return (&poc.ExploitDB{DB: cacheDB}).ForceUpdate(ctx)
-		},
+	updaters := map[string]poc.ForceUpdater{
+		"exploitdb":       poc.NewExploitDB(cacheDB),
+		"trickest":        poc.NewTrickest(cacheDB),
+		"metasploit":      poc.NewMetasploit(cacheDB),
+		"nuclei":          poc.NewNuclei(cacheDB),
+		"tg12":            poc.NewTg12(cacheDB),
+		"awesome-cve-poc": poc.NewAwesomeCVEPOC(cacheDB),
 	}
+	out := make(map[string]func(ctx context.Context) (int, error), len(updaters))
+	for name, src := range updaters {
+		out[name] = src.ForceUpdate
+	}
+	return out
 }
 
 func newUpdateCommand() *cobra.Command {
