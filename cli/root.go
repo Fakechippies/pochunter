@@ -146,6 +146,7 @@ func Execute() error {
 	rootCmd.SetArgs(normalizeCompatFlags(os.Args[1:]))
 	rootCmd.AddCommand(newUpdateCommand())
 	rootCmd.AddCommand(newSelfUpdateCommand())
+	rootCmd.AddCommand(newRecentCommand())
 	return rootCmd.Execute()
 }
 
