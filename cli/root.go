@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,6 +61,40 @@ func paint(code, s string) string {
 	}
 	return code + s + colorReset
 }
+
+// sourceColors pins familiar sources to stable colors.
+var sourceColors = map[string]string{
+	"NVD":               colorCyan,
+	"CIRCL":             "\033[35m", // magenta
+	"OSV":               "\033[34m", // blue
+	"Vulners":           "\033[96m", // bright cyan
+	"github-advisories": "\033[92m", // bright green
+	"poc-in-github":     colorGreen,
+	"search-vulns":      "\033[93m",       // bright yellow
+	"exploitdb":         "\033[38;5;208m", // orange
+	"trickest":          "\033[94m",       // bright blue
+	"metasploit":        colorRed,
+	"nuclei":            "\033[90m",       // gray
+	"tg12":              "\033[33m",       // yellow
+	"awesome-cve-poc":   "\033[38;5;213m", // pink
+	"vulncheck-xdb":     "\033[38;5;51m",
+	"vulncheck-iac":     "\033[38;5;51m",
+}
+
+// sourceColor returns a stable color for a source name (hash fallback).
+func sourceColor(name string) string {
+	if c, ok := sourceColors[name]; ok {
+		return c
+	}
+	palette := []string{colorCyan, colorGreen, colorYellow, "\033[35m", "\033[34m", "\033[96m", "\033[94m"}
+	sum := 0
+	for _, r := range name {
+		sum += int(r)
+	}
+	return palette[sum%len(palette)]
+}
+
+var colorGray = "\033[90m"
 
 type options struct {
 	pocMode    bool
@@ -829,7 +864,7 @@ func printCVEFindings(source string, findings []cve.Finding, showScore bool, kev
 			colored := paint(scoreColor(f.Score), score)
 			for i, line := range lines {
 				if i == 0 {
-					fmt.Printf("%-*s%*s%*s  %s\n", cveW, f.CVE, srcW+gap, f.Source, scoreW+gap, colored, line)
+					fmt.Printf("%-*s%*s%*s  %s\n", cveW, paint(colorBold, f.CVE), srcW+gap, paint(sourceColor(f.Source), f.Source), scoreW+gap, colored, line)
 				} else {
 					fmt.Printf("%-*s%*s%*s  %s\n", cveW, "", srcW+gap, "", scoreW+gap, "", line)
 				}
@@ -844,18 +879,18 @@ func printCVEFindings(source string, findings []cve.Finding, showScore bool, kev
 	}
 
 	fmt.Printf("%s\n", paint(colorBold, fmt.Sprintf("%-*s%*s  %s", cveW, "CVE", srcW+gap, "SOURCE", "DETAIL")))
-	fmt.Printf("%s%s\n", strings.Repeat("─", cveW), strings.Repeat("─", srcW+gap))
+	fmt.Printf("%s\n", strings.Repeat("─", cveW+gap+srcW+gap+detailW))
 
 	for _, f := range findings {
 		detail := strings.ReplaceAll(f.Detail, "\n", " ")
 		detail = strings.ReplaceAll(detail, "\r", "")
 		if kev[f.CVE] {
-			detail = "[KEV] " + detail
+			detail = paint(colorRed, "[KEV]") + " " + detail
 		}
 		lines := wrapText(detail, detailW)
 		for i, line := range lines {
 			if i == 0 {
-				fmt.Printf("%-*s%*s  %s\n", cveW, f.CVE, srcW+gap, f.Source, line)
+				fmt.Printf("%-*s%*s  %s\n", cveW, paint(colorBold, f.CVE), srcW+gap, paint(sourceColor(f.Source), f.Source), line)
 			} else {
 				fmt.Printf("%-*s%*s  %s\n", cveW, "", srcW+gap, "", line)
 			}
@@ -863,16 +898,62 @@ func printCVEFindings(source string, findings []cve.Finding, showScore bool, kev
 	}
 }
 
+// printPOCFindings renders the human-readable POC table. Rows are aggregated
+// by canonical URL so the same PoC reported by several sources shows once,
+// with every reporting source listed in the SOURCES column; structured
+// output (-o json/jsonl/csv) keeps all raw findings un-deduplicated.
 func printPOCFindings(source string, findings []poc.Finding) {
 	successf("%s: %d POCs", source, len(findings))
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, paint(colorBold, "CVE")+"\t"+paint(colorBold, "SOURCE")+"\t"+paint(colorBold, "OWNER")+"\t"+paint(colorBold, "PUSHED AT")+"\t"+paint(colorBold, "POC"))
-	for _, finding := range findings {
-		src := finding.Source
+
+	type aggRow struct {
+		cve      string
+		url      string
+		owner    string
+		pushedAt string
+		sources  []string
+	}
+	key := func(f poc.Finding) [2]string {
+		return [2]string{f.CVE, db.CanonicalURL(f.POC)}
+	}
+	seen := map[[2]string]*aggRow{}
+	var rows []*aggRow
+	for _, f := range findings {
+		k := key(f)
+		row, ok := seen[k]
+		if !ok {
+			row = &aggRow{cve: f.CVE, url: f.POC}
+			seen[k] = row
+			rows = append(rows, row)
+		}
+		if row.owner == "" {
+			row.owner = f.Owner
+		}
+		if row.pushedAt == "" || row.pushedAt == "-" {
+			row.pushedAt = f.PushedAt
+		}
+		src := f.Source
 		if src == "" {
 			src = source
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", finding.CVE, src, finding.Owner, finding.PushedAt, finding.POC)
+		if !slices.Contains(row.sources, src) {
+			row.sources = append(row.sources, src)
+		}
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, paint(colorBold, "CVE")+"\t"+paint(colorBold, "SOURCES")+"\t"+paint(colorBold, "OWNER")+"\t"+paint(colorBold, "PUSHED AT")+"\t"+paint(colorBold, "POC"))
+	for _, row := range rows {
+		sort.Strings(row.sources)
+		sources := paint(sourceColor(row.sources[0]), strings.Join(row.sources, ", "))
+		owner := row.owner
+		if owner == "" {
+			owner = "-"
+		}
+		pushedAt := row.pushedAt
+		if pushedAt == "" {
+			pushedAt = "-"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			paint(colorBold, row.cve), sources, paint(colorGray, owner), paint(colorGray, pushedAt), row.url)
 	}
 	_ = w.Flush()
 }
