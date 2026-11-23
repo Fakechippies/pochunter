@@ -24,22 +24,32 @@ Set TypingSpeed 40ms
 # -- intro ----------------------------------------------------------------
 Type@80ms "pochunter --help" Enter
 Sleep 1.5s
+Ctrl+L
+Sleep 500ms
 
 # -- free-form search: version auto-detected, CPE-resolved NVD query ------
 Type@80ms "pochunter --search curl 7.0" Enter
 Sleep 4s
+Ctrl+L
+Sleep 500ms
 
 # -- direct POC mode: stacked sources, local CVE cache enrichment ---------
 Type@80ms "pochunter -poc CVE-2024-22198" Enter
 Sleep 3s
+Ctrl+L
+Sleep 500ms
 
 # -- delta log: freshest CVEs from cvelistV5 ------------------------------
 Type@80ms "pochunter recent -n 8" Enter
 Sleep 2.5s
+Ctrl+L
+Sleep 500ms
 
 # -- cache maintenance: revision-checked refresh of bulk indexes ----------
 Type@80ms "pochunter update" Enter
-Sleep 6s
+Sleep 8s
+Ctrl+L
+Sleep 500ms
 
 # -- plain piped output stays stable (no colors, fixed width) -------------
 Type@80ms "pochunter --search curl 7.0 | cat" Enter
