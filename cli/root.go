@@ -119,6 +119,7 @@ func run(args []string, opts options) error {
 		cveID := normalizeCVE(args)
 		progressf("POC mode enabled for %s", cveID)
 		pocs := runPOCSources(ctx, pocSources, cveID)
+		printCVEInfoEnrichment(cacheDB, cveID)
 		if isStructured() {
 			return emitStructured(cveID, nil, nil, pocs)
 		}
@@ -256,6 +257,34 @@ func resolveDBPath(flagPath string) string {
 	return ""
 }
 
+// printCVEInfoEnrichment surfaces cached bare CVE info in direct POC mode,
+// where no CVE source is queried and the cves table may already hold a
+// summary from earlier searches.
+func printCVEInfoEnrichment(cacheDB *db.DB, cveIDs ...string) {
+	if cacheDB == nil {
+		return
+	}
+	for _, id := range cveIDs {
+		summary, ok, err := cacheDB.CVEInfoGet(id)
+		if err != nil || !ok || summary == "" {
+			continue
+		}
+		if len(summary) > 160 {
+			summary = summary[:157] + "..."
+		}
+		progressf("%s: %s (from local CVE cache)", id, summary)
+	}
+}
+
+// vulncheckToken resolves the VulnCheck API token: the official
+// VULNCHECK_API_TOKEN name first, VULNCHECK_API_KEY as a fallback.
+func vulncheckToken() string {
+	if key := strings.TrimSpace(os.Getenv("VULNCHECK_API_TOKEN")); key != "" {
+		return key
+	}
+	return strings.TrimSpace(os.Getenv("VULNCHECK_API_KEY"))
+}
+
 // openCacheDB opens the shared cache database unless caching is disabled.
 // Failures are reported but never fatal: the tool works without a cache.
 func openCacheDB(opts options) *db.DB {
@@ -279,6 +308,9 @@ func buildPOCSources(cacheDB *db.DB, ttl time.Duration) []poc.Source {
 	sources = append(sources, poc.POCInGithub{})
 	if key := strings.TrimSpace(os.Getenv("SEARCHVULNS_API_KEY")); key != "" {
 		sources = append(sources, poc.SearchVulns{APIKey: key})
+	}
+	if key := vulncheckToken(); key != "" {
+		sources = append(sources, poc.VulnCheckXDB{APIKey: key}, poc.VulnCheckIAC{APIKey: key})
 	}
 	if cacheDB != nil {
 		// Bulk-index sources are backed by the cache database.
