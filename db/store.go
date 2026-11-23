@@ -126,3 +126,122 @@ func toPOCRows(stored []storedPOC) []POCRow {
 	}
 	return out
 }
+
+// IndexRev returns the stored upstream revision of a bulk-index source, if
+// one has ever been recorded.
+func (d *DB) IndexRev(source string) (string, bool) {
+	var rev string
+	err := d.sql.QueryRow("SELECT rev FROM indexes WHERE source = ?", source).Scan(&rev)
+	if err != nil {
+		return "", false
+	}
+	return rev, true
+}
+
+// SetIndexRev records the upstream revision and fetch time of a bulk-index
+// source, so a rebuild can be skipped while the revision is unchanged.
+func (d *DB) SetIndexRev(source, rev string, now time.Time) error {
+	if source == "" {
+		return fmt.Errorf("db: empty source")
+	}
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+	_, err := d.sql.Exec(`
+		INSERT INTO indexes(source, rev, fetched_at) VALUES (?, ?, ?)
+		ON CONFLICT(source) DO UPDATE SET
+			rev = excluded.rev,
+			fetched_at = excluded.fetched_at
+	`, source, rev, now.UTC().Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("db: set index rev: %w", err)
+	}
+	return nil
+}
+
+// IndexFetchedAt returns when the bulk-index source's snapshot was last
+// refreshed, if ever.
+func (d *DB) IndexFetchedAt(source string) (time.Time, bool) {
+	var fetched string
+	err := d.sql.QueryRow("SELECT fetched_at FROM indexes WHERE source = ?", source).Scan(&fetched)
+	if err != nil {
+		return time.Time{}, false
+	}
+	when, err := time.Parse(time.RFC3339, fetched)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return when, true
+}
+
+// IndexPOCRow is one CVE-to-POC link extracted from a bulk-index snapshot.
+type IndexPOCRow struct {
+	CVE      string
+	URL      string
+	Detail   string
+	PushedAt string
+}
+
+// StoreIndexPOCs replaces all rows of a bulk-index source with the given
+// snapshot rows. It must be called with a complete index, never incrementally.
+func (d *DB) StoreIndexPOCs(source string, rows []IndexPOCRow) error {
+	if source == "" {
+		return fmt.Errorf("db: empty source")
+	}
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("db: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM index_pocs WHERE source = ?", source); err != nil {
+		return fmt.Errorf("db: clear index: %w", err)
+	}
+	stmt, err := tx.Prepare(`
+		INSERT INTO index_pocs(source, cve_id, url, detail, pushed_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(source, cve_id, url) DO NOTHING
+	`)
+	if err != nil {
+		return fmt.Errorf("db: prepare: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, r := range rows {
+		if r.CVE == "" || r.URL == "" {
+			continue
+		}
+		if _, err := stmt.Exec(source, r.CVE, r.URL, r.Detail, r.PushedAt); err != nil {
+			return fmt.Errorf("db: insert index poc: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+// IndexPOCs returns the CVE-to-POC links recorded for cve by a bulk-index
+// source. Missing rows are an empty, non-error result.
+func (d *DB) IndexPOCs(cve, source string) ([]IndexPOCRow, error) {
+	rows, err := d.sql.Query(`
+		SELECT url, detail, pushed_at
+		FROM index_pocs
+		WHERE cve_id = ? AND source = ?
+		ORDER BY url
+	`, cve, source)
+	if err != nil {
+		return nil, fmt.Errorf("db: query index pocs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []IndexPOCRow
+	for rows.Next() {
+		var r IndexPOCRow
+		if err := rows.Scan(&r.URL, &r.Detail, &r.PushedAt); err != nil {
+			return nil, fmt.Errorf("db: scan index poc: %w", err)
+		}
+		r.CVE = cve
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

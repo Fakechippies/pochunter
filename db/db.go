@@ -54,10 +54,11 @@ CREATE TABLE IF NOT EXISTS indexes(
 
 -- CVE-to-POC links extracted from a bulk-index snapshot, one row per link.
 CREATE TABLE IF NOT EXISTS index_pocs(
-	source TEXT NOT NULL,
-	cve_id TEXT NOT NULL,
-	url    TEXT NOT NULL,
-	detail TEXT NOT NULL DEFAULT '',
+	source    TEXT NOT NULL,
+	cve_id    TEXT NOT NULL,
+	url       TEXT NOT NULL,
+	detail    TEXT NOT NULL DEFAULT '',
+	pushed_at TEXT NOT NULL DEFAULT '',
 	UNIQUE (source, cve_id, url)
 );
 `
@@ -105,6 +106,12 @@ func (d *DB) Close() error {
 		return nil
 	}
 	return d.sql.Close()
+}
+
+// Exec runs a write statement under the write mutex. Exposed for maintenance
+// operations and tests.
+func (d *DB) Exec(query string, args ...any) error {
+	return d.exec(query, args...)
 }
 
 // exec runs a statement under the write mutex.

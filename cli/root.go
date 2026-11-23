@@ -259,8 +259,17 @@ func buildPOCSources(cacheDB *db.DB, ttl time.Duration) []poc.Source {
 	if key := strings.TrimSpace(os.Getenv("SEARCHVULNS_API_KEY")); key != "" {
 		sources = append(sources, poc.SearchVulns{APIKey: key})
 	}
+	if cacheDB != nil {
+		// Bulk-index sources are backed by the cache database.
+		sources = append(sources, &poc.ExploitDB{DB: cacheDB})
+	}
 	if cacheDB != nil && ttl > 0 {
 		for i, s := range sources {
+			// Bulk-index sources manage their own freshness via the
+			// upstream revision; only wrap plain API sources.
+			if _, ok := s.(*poc.ExploitDB); ok {
+				continue
+			}
 			sources[i] = poc.CachedSource{Inner: s, DB: cacheDB, TTL: ttl}
 		}
 	}
