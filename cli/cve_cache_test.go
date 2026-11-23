@@ -73,9 +73,9 @@ func TestCollectCVEsCachesPerSource(t *testing.T) {
 	}
 
 	// Per-CVE bare info was filled lazily from the API results.
-	summary, ok, err := d.CVEInfoGet("CVE-2021-44228")
-	if err != nil || !ok || summary != "log4j RCE" {
-		t.Errorf("CVEInfoGet = %q ok=%v err=%v", summary, ok, err)
+	info, ok, err := d.CVEInfoGet("CVE-2021-44228")
+	if err != nil || !ok || info.Summary != "log4j RCE" {
+		t.Errorf("CVEInfoGet = %+v ok=%v err=%v", info, ok, err)
 	}
 }
 

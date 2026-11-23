@@ -11,6 +11,14 @@ import (
 
 const vulncheckBaseURL = "https://api.vulncheck.com/v3/index/"
 
+// vulncheckHeaders builds the auth headers shared by all VulnCheck calls.
+func vulncheckHeaders(apiKey string) map[string]string {
+	return map[string]string{
+		"Authorization": "Bearer " + apiKey,
+		"Accept":        "application/json",
+	}
+}
+
 // VulnCheckXDB maps CVE IDs to VulnCheck XDB entries (community exploit
 // intelligence). On-demand API source; community tier allows 1000 requests
 // per minute and results are cached by the standard POC cache decorator.
@@ -25,15 +33,11 @@ func (v VulnCheckXDB) Query(ctx context.Context, CVE string) ([]Finding, error) 
 		return nil, fmt.Errorf("API key needed for vulncheck (set VULNCHECK_API_TOKEN)")
 	}
 	url := vulncheckBaseURL + "xdb?cve=" + CVE
-	headers := map[string]string{
-		"Authorization": "Bearer " + v.APIKey,
-		"Accept":        "application/json",
-	}
 
 	var resp struct {
 		Data []vulncheckXDBEntry `json:"data"`
 	}
-	if err := httpclient.JSON(ctx, "GET", url, headers, nil, &resp); err != nil {
+	if err := httpclient.JSON(ctx, "GET", url, vulncheckHeaders(v.APIKey), nil, &resp); err != nil {
 		return nil, err
 	}
 	return vulncheckXDBFindings(CVE, resp.Data), nil
@@ -101,10 +105,7 @@ func (v VulnCheckIAC) Query(ctx context.Context, CVE string) ([]Finding, error) 
 		return nil, fmt.Errorf("API key needed for vulncheck (set VULNCHECK_API_TOKEN)")
 	}
 	url := vulncheckBaseURL + "initial-access-community?cve=" + CVE
-	headers := map[string]string{
-		"Authorization": "Bearer " + v.APIKey,
-		"Accept":        "application/json",
-	}
+	headers := vulncheckHeaders(v.APIKey)
 
 	var resp struct {
 		Data []struct {
@@ -142,4 +143,46 @@ func (v VulnCheckIAC) Query(ctx context.Context, CVE string) ([]Finding, error) 
 		}
 	}
 	return findings, nil
+}
+
+// VulnCheckKEV fetches VulnCheck's extended KEV (CISA KEV plus VulnCheck
+// enrichment, ~6k records). It is not a poc.Source: the data is used for
+// bulk enrichment of the local CVE table (kev flag), refreshed via
+// `pochunter update vulncheck-kev`. Community-tier entitled.
+type VulnCheckKEV struct {
+	APIKey string
+}
+
+func (v VulnCheckKEV) Name() string { return "vulncheck-kev" }
+
+type vulncheckKEVEntry struct {
+	CVE []string `json:"cve"`
+}
+
+// FetchAll retrieves every KEV record by page-paginating the index (1000 per
+// page, ~7 pages today). The cve field is an array of aliases.
+func (v VulnCheckKEV) FetchAll(ctx context.Context) ([]vulncheckKEVEntry, error) {
+	if v.APIKey == "" {
+		return nil, fmt.Errorf("API key needed for vulncheck (set VULNCHECK_API_TOKEN)")
+	}
+
+	var all []vulncheckKEVEntry
+	for page := 1; ; page++ {
+		url := fmt.Sprintf("%svulncheck-kev?limit=1000&page=%d", vulncheckBaseURL, page)
+		var resp struct {
+			Data []vulncheckKEVEntry `json:"data"`
+			Meta struct {
+				Page       int `json:"page"`
+				TotalPages int `json:"total_pages"`
+			} `json:"_meta"`
+		}
+		if err := httpclient.JSON(ctx, "GET", url, vulncheckHeaders(v.APIKey), nil, &resp); err != nil {
+			return nil, err
+		}
+		all = append(all, resp.Data...)
+		if len(resp.Data) == 0 || resp.Meta.Page >= resp.Meta.TotalPages || page > 100 {
+			break
+		}
+	}
+	return all, nil
 }

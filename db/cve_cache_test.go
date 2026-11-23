@@ -97,17 +97,17 @@ func TestCVEInfoStoreAndGet(t *testing.T) {
 	if err := d.CVEInfoStore(rows, now); err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	summary, ok, err := d.CVEInfoGet("CVE-2021-44228")
-	if err != nil || !ok || summary != "log4j RCE" {
-		t.Errorf("get = %q ok=%v err=%v", summary, ok, err)
+	info, ok, err := d.CVEInfoGet("CVE-2021-44228")
+	if err != nil || !ok || info.Summary != "log4j RCE" {
+		t.Errorf("get = %+v ok=%v err=%v", info, ok, err)
 	}
 
 	// Upsert refreshes summary; empty-ID rows are skipped.
 	if err := d.CVEInfoStore([]CVEInfoRow{{ID: "CVE-2021-44228", Summary: "updated"}}, now); err != nil {
 		t.Fatalf("store 2nd: %v", err)
 	}
-	if summary, _, _ := d.CVEInfoGet("CVE-2021-44228"); summary != "updated" {
-		t.Errorf("summary = %q, want updated", summary)
+	if info, _, _ := d.CVEInfoGet("CVE-2021-44228"); info.Summary != "updated" {
+		t.Errorf("summary = %q, want updated", info.Summary)
 	}
 
 	// Expiry: backdate, then any write evicts.
@@ -157,8 +157,8 @@ func TestMigrateCvesFetchedAt(t *testing.T) {
 	if err := d.CVEInfoStore([]CVEInfoRow{{ID: "CVE-2", Summary: "new"}}, time.Now()); err != nil {
 		t.Fatalf("store after migration: %v", err)
 	}
-	if summary, ok, _ := d.CVEInfoGet("CVE-2"); !ok || summary != "new" {
-		t.Errorf("store/get after migration failed: %q ok=%v", summary, ok)
+	if info, ok, _ := d.CVEInfoGet("CVE-2"); !ok || info.Summary != "new" {
+		t.Errorf("store/get after migration failed: %+v ok=%v", info, ok)
 	}
 	if err := d.CVEInfoStore([]CVEInfoRow{{ID: "CVE-3", Summary: "trigger evict"}}, time.Now()); err != nil {
 		t.Fatalf("store 2nd after migration: %v", err)

@@ -92,7 +92,62 @@ func (d *DB) cveCacheEvict(now time.Time, ttl time.Duration, capKeys int) error 
 	return nil
 }
 
-// CVEInfoRow is the bare, immutable info we keep about a single CVE.
+// CVEInfo is the bare info we keep about a single CVE.
+type CVEInfo struct {
+	Summary string
+	KEV     bool
+}
+
+// CVEKEVMark flags CVE ids as listed in KEV. Missing rows are created;
+// existing summaries are preserved. Returns the number of ids marked.
+func (d *DB) CVEKEVMark(ids []string, now time.Time) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	fetched := now.UTC().Format(time.RFC3339)
+
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("db: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO cves(id, published, summary, kev, epss, fetched_at) VALUES (?, '', '', 1, NULL, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			kev = 1,
+			fetched_at = excluded.fetched_at
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("db: prepare: %w", err)
+	}
+	defer stmt.Close()
+
+	marked := 0
+	seen := map[string]struct{}{}
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		if _, err := stmt.Exec(id, fetched); err != nil {
+			return 0, fmt.Errorf("db: cve kev mark: %w", err)
+		}
+		marked++
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("db: cve kev mark: %w", err)
+	}
+	return marked, d.cveInfoEvictLocked(now)
+}
+
+// CVEInfoRow is one bare-info row to store, as filled from CVE source results.
 type CVEInfoRow struct {
 	ID      string
 	Summary string
@@ -142,10 +197,11 @@ func (d *DB) CVEInfoStore(rows []CVEInfoRow, now time.Time) error {
 }
 
 // cveInfoEvictLocked evicts expired and over-cap rows; the caller holds the
-// write lock. RFC3339 UTC stamps compare correctly as strings.
+// write lock. RFC3339 UTC stamps compare correctly as strings. KEV rows are
+// exempt from TTL eviction (the flag is refreshed by the bulk update).
 func (d *DB) cveInfoEvictLocked(now time.Time) error {
 	cutoff := now.Add(-CVEInfoTTL).UTC().Format(time.RFC3339)
-	if _, err := d.sql.Exec("DELETE FROM cves WHERE fetched_at < ?", cutoff); err != nil {
+	if _, err := d.sql.Exec("DELETE FROM cves WHERE kev = 0 AND fetched_at < ?", cutoff); err != nil {
 		return fmt.Errorf("db: cve info evict: %w", err)
 	}
 	if _, err := d.sql.Exec(`
@@ -157,20 +213,25 @@ func (d *DB) cveInfoEvictLocked(now time.Time) error {
 	return nil
 }
 
-// CVEInfoGet returns the stored bare info for a CVE id, if present and not
-// expired.
-func (d *DB) CVEInfoGet(id string) (summary string, ok bool, err error) {
+// CVEInfoGet returns the stored bare info for a CVE id, if present. Rows
+// without the KEV flag expire after CVEInfoTTL; KEV rows stay until the cap
+// evicts them.
+func (d *DB) CVEInfoGet(id string) (CVEInfo, bool, error) {
 	var s, fetched string
-	scanErr := d.sql.QueryRow("SELECT summary, fetched_at FROM cves WHERE id = ?", id).Scan(&s, &fetched)
+	var kev int
+	scanErr := d.sql.QueryRow("SELECT summary, kev, fetched_at FROM cves WHERE id = ?", id).Scan(&s, &kev, &fetched)
 	if scanErr == sql.ErrNoRows {
-		return "", false, nil
+		return CVEInfo{}, false, nil
 	}
 	if scanErr != nil {
-		return "", false, fmt.Errorf("db: cve info get: %w", scanErr)
+		return CVEInfo{}, false, fmt.Errorf("db: cve info get: %w", scanErr)
 	}
 	when, err := time.Parse(time.RFC3339, fetched)
-	if err != nil || time.Since(when) >= CVEInfoTTL {
-		return "", false, nil
+	if err != nil {
+		return CVEInfo{}, false, nil
 	}
-	return s, true, nil
+	if kev == 0 && time.Since(when) >= CVEInfoTTL {
+		return CVEInfo{}, false, nil
+	}
+	return CVEInfo{Summary: s, KEV: kev == 1}, true, nil
 }

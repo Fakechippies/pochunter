@@ -69,6 +69,7 @@ func Execute() error {
 	rootCmd.Flags().StringVar(&opts.ecosystem, "ecosystem", "", "package ecosystem (for sources that use it)")
 	rootCmd.Flags().StringSliceVar(&opts.sources, "sources", nil, "CVE sources to use (comma-separated: nvd,circl,osv,vulners,github)")
 	rootCmd.Flags().StringVarP(&opts.output, "output", "o", "table", "output format: table, json, jsonl, csv")
+	rootCmd.PersistentFlags().BoolVarP(&verboseMode, "verbose", "v", false, "show per-source API errors (hidden by default)")
 	rootCmd.Flags().DurationVar(&opts.timeout, "timeout", 30*time.Second, "request timeout")
 	rootCmd.Flags().StringVar(&opts.dbPath, "db", "", "POC cache database path (overrides POCHUNTER_DB; default: os.UserCacheDir()/pochunter/pochunter.db)")
 	rootCmd.Flags().BoolVar(&opts.noCache, "no-cache", false, "disable all local caching (POC and CVE)")
@@ -168,7 +169,8 @@ func run(args []string, opts options) error {
 	}
 
 	if !isStructured() {
-		printCVEFindings("CVE Discovery", allCVEFindings, isFreeForm)
+		kevSet := cveKEVSet(cacheDB, uniqueCVEs)
+		printCVEFindings("CVE Discovery", allCVEFindings, isFreeForm, kevSet)
 		successf("Unique CVEs: %d", len(uniqueCVEs))
 	}
 	printCVESourceErrors(cveResults)
@@ -265,14 +267,22 @@ func printCVEInfoEnrichment(cacheDB *db.DB, cveIDs ...string) {
 		return
 	}
 	for _, id := range cveIDs {
-		summary, ok, err := cacheDB.CVEInfoGet(id)
-		if err != nil || !ok || summary == "" {
+		info, ok, err := cacheDB.CVEInfoGet(id)
+		if err != nil || !ok || (info.Summary == "" && !info.KEV) {
 			continue
 		}
+		summary := info.Summary
 		if len(summary) > 160 {
 			summary = summary[:157] + "..."
 		}
-		progressf("%s: %s (from local CVE cache)", id, summary)
+		kevTag := ""
+		if info.KEV {
+			kevTag = " [KEV]"
+		}
+		if summary == "" {
+			summary = "listed in KEV"
+		}
+		progressf("%s: %s%s (from local CVE cache)", id, summary, kevTag)
 	}
 }
 
@@ -553,38 +563,67 @@ func sortPOCFindings(all []poc.Finding) []poc.Finding {
 	return all
 }
 
-func printPOCErrors(results []pocResult) {
-	rateLimitPrinted := make(map[string]bool)
-	for _, result := range results {
-		if result.err != nil {
-			if isRateLimitError(result.err) {
-				sourceKey := extractSourceKey(result.err)
-				if !rateLimitPrinted[sourceKey] {
-					rateLimitPrinted[sourceKey] = true
-					warnf("%s: %v (rate limit reached, suppressing further rate-limit warnings)", result.cveID, result.err)
-				}
+// verboseMode controls whether per-source API errors print in full. Set by
+// the persistent -v/--verbose flag; hidden by default.
+var verboseMode = false
+
+type sourceError struct {
+	name   string // display name (source or CVE id)
+	source string // owning source, for grouping and rate-limit suppression
+	err    error
+}
+
+// reportSourceErrors prints API errors from sources. By default they are
+// collapsed into one summary line so output stays clean; -v/--verbose prints
+// every error in full, with rate-limit warnings suppressed per source.
+func reportSourceErrors(label string, errs []sourceError) {
+	if len(errs) == 0 {
+		return
+	}
+	if !verboseMode {
+		seen := map[string]struct{}{}
+		var sources []string
+		for _, e := range errs {
+			if _, ok := seen[e.source]; !ok {
+				seen[e.source] = struct{}{}
+				sources = append(sources, e.source)
+			}
+		}
+		warnf("%s: %d error(s) from %s (use -v to show)", label, len(errs), strings.Join(sources, ", "))
+		return
+	}
+	printedRateLimit := map[string]struct{}{}
+	for _, e := range errs {
+		if isRateLimitError(e.err) {
+			if _, ok := printedRateLimit[e.source]; ok {
 				continue
 			}
-			warnf("%s: %v", result.cveID, result.err)
+			printedRateLimit[e.source] = struct{}{}
+			warnf("%s: %v (rate limit reached, suppressing further rate-limit warnings)", e.name, e.err)
+			continue
 		}
+		warnf("%s: %v", e.name, e.err)
 	}
 }
 
-func printCVESourceErrors(results []cveSourceResult) {
-	rateLimitPrinted := make(map[string]bool)
+func printPOCErrors(results []pocResult) {
+	var errs []sourceError
 	for _, result := range results {
 		if result.err != nil {
-			if isRateLimitError(result.err) {
-				sourceKey := extractSourceKey(result.err)
-				if !rateLimitPrinted[sourceKey] {
-					rateLimitPrinted[sourceKey] = true
-					warnf("%s: %v (rate limit reached, suppressing further rate-limit warnings)", result.source, result.err)
-				}
-				continue
-			}
-			warnf("%s: %v", result.source, result.err)
+			errs = append(errs, sourceError{name: result.cveID, source: extractSourceKey(result.err), err: result.err})
 		}
 	}
+	reportSourceErrors("POC lookups", errs)
+}
+
+func printCVESourceErrors(results []cveSourceResult) {
+	var errs []sourceError
+	for _, result := range results {
+		if result.err != nil {
+			errs = append(errs, sourceError{name: result.source, source: result.source, err: result.err})
+		}
+	}
+	reportSourceErrors("CVE sources", errs)
 }
 
 func isRateLimitError(err error) bool {
@@ -664,6 +703,7 @@ func runPOCSources(ctx context.Context, sources []poc.Source, cveID string) []po
 	results := make(chan pocSourceResult, len(sources))
 	var wg sync.WaitGroup
 
+	var errs []sourceError
 	for _, source := range sources {
 		wg.Add(1)
 		go func(s poc.Source) {
@@ -679,11 +719,7 @@ func runPOCSources(ctx context.Context, sources []poc.Source, cveID string) []po
 	var all []poc.Finding
 	for result := range results {
 		if result.err != nil {
-			if isRateLimitError(result.err) {
-				errorf("%s: %v (rate limit reached)", result.name, result.err)
-			} else {
-				errorf("%s: %v", result.name, result.err)
-			}
+			errs = append(errs, sourceError{name: result.name, source: result.name, err: result.err})
 			continue
 		}
 		for i := range result.findings {
@@ -693,6 +729,7 @@ func runPOCSources(ctx context.Context, sources []poc.Source, cveID string) []po
 		}
 		all = append(all, result.findings...)
 	}
+	reportSourceErrors("POC sources", errs)
 	return sortPOCFindings(all)
 }
 
@@ -700,7 +737,22 @@ func normalizeCVE(args []string) string {
 	return strings.ToUpper(strings.Join(args, "-"))
 }
 
-func printCVEFindings(source string, findings []cve.Finding, showScore bool) {
+// cveKEVSet returns the set of KEV-listed CVEs among ids, from the local CVE
+// cache (filled by `pochunter update vulncheck-kev`). Empty when no cache.
+func cveKEVSet(cacheDB *db.DB, ids []string) map[string]bool {
+	if cacheDB == nil {
+		return nil
+	}
+	kev := map[string]bool{}
+	for _, id := range ids {
+		if info, ok, err := cacheDB.CVEInfoGet(id); err == nil && ok && info.KEV {
+			kev[id] = true
+		}
+	}
+	return kev
+}
+
+func printCVEFindings(source string, findings []cve.Finding, showScore bool, kev map[string]bool) {
 	if len(findings) == 0 {
 		warnf("%s: no CVEs found", source)
 		return
@@ -739,6 +791,9 @@ func printCVEFindings(source string, findings []cve.Finding, showScore bool) {
 		for _, f := range findings {
 			detail := strings.ReplaceAll(f.Detail, "\n", " ")
 			detail = strings.ReplaceAll(detail, "\r", "")
+			if kev[f.CVE] {
+				detail = "[KEV] " + detail
+			}
 			lines := wrapText(detail, detailW)
 			score := fmt.Sprintf("%.1f", f.Score)
 			for i, line := range lines {
@@ -763,6 +818,9 @@ func printCVEFindings(source string, findings []cve.Finding, showScore bool) {
 	for _, f := range findings {
 		detail := strings.ReplaceAll(f.Detail, "\n", " ")
 		detail = strings.ReplaceAll(detail, "\r", "")
+		if kev[f.CVE] {
+			detail = "[KEV] " + detail
+		}
 		lines := wrapText(detail, detailW)
 		for i, line := range lines {
 			if i == 0 {

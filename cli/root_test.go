@@ -132,47 +132,45 @@ func TestIsRateLimitError(t *testing.T) {
 	}
 }
 
-func TestPrintPOCErrors_SuppressesDuplicateRateLimits(t *testing.T) {
-	// Capture stdout
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
+func TestPrintPOCErrors_SummarizesByDefault(t *testing.T) {
+	verboseMode = false
+	defer func() { verboseMode = false }()
 
 	results := []pocResult{
-		{
-			cveID: "CVE-2004-0369",
-			err:   fmt.Errorf("search-vulns: status 429: {\"message\":\"Too many requests\"}"),
-		},
-		{
-			cveID: "CVE-2004-0605",
-			err:   fmt.Errorf("search-vulns: status 429: {\"message\":\"Too many requests\"}"),
-		},
-		{
-			cveID: "CVE-2004-0674",
-			err:   fmt.Errorf("search-vulns: status 429: {\"message\":\"Too many requests\"}"),
-		},
-		{
-			cveID: "CVE-2004-9999",
-			err:   fmt.Errorf("other-source: connection timeout"),
-		},
+		{cveID: "CVE-2004-0369", err: fmt.Errorf("search-vulns: status 429: {\"message\":\"Too many requests\"}")},
+		{cveID: "CVE-2004-0605", err: fmt.Errorf("search-vulns: status 429: {\"message\":\"Too many requests\"}")},
+		{cveID: "CVE-2004-0674", err: fmt.Errorf("search-vulns: status 429: {\"message\":\"Too many requests\"}")},
+		{cveID: "CVE-2004-9999", err: fmt.Errorf("other-source: connection timeout")},
 	}
 
-	printPOCErrors(results)
+	output := captureStdout(t, func() { printPOCErrors(results) })
 
-	w.Close()
-	os.Stdout = oldStdout
+	// Default mode: one summary line, no full errors.
+	if !strings.Contains(output, "4 error(s) from search-vulns, other-source") {
+		t.Errorf("expected compact summary, got:\n%s", output)
+	}
+	if strings.Contains(output, "status 429") || strings.Contains(output, "connection timeout") {
+		t.Errorf("full errors must be hidden without -v, got:\n%s", output)
+	}
+}
 
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	output := buf.String()
+func TestPrintPOCErrors_VerboseSuppressesDuplicateRateLimits(t *testing.T) {
+	verboseMode = true
+	defer func() { verboseMode = false }()
 
-	// Should only mention 429 / rate limit once
-	count429 := strings.Count(output, "rate limit reached")
-	if count429 != 1 {
+	results := []pocResult{
+		{cveID: "CVE-2004-0369", err: fmt.Errorf("search-vulns: status 429: {\"message\":\"Too many requests\"}")},
+		{cveID: "CVE-2004-0605", err: fmt.Errorf("search-vulns: status 429: {\"message\":\"Too many requests\"}")},
+		{cveID: "CVE-2004-0674", err: fmt.Errorf("search-vulns: status 429: {\"message\":\"Too many requests\"}")},
+		{cveID: "CVE-2004-9999", err: fmt.Errorf("other-source: connection timeout")},
+	}
+
+	output := captureStdout(t, func() { printPOCErrors(results) })
+
+	// Verbose mode: rate limit printed once per source, other errors in full.
+	if count429 := strings.Count(output, "rate limit reached"); count429 != 1 {
 		t.Errorf("expected 1 rate limit warning, got %d. Output:\n%s", count429, output)
 	}
-
-	// Should print the non-rate-limit error normally
 	if !strings.Contains(output, "other-source: connection timeout") {
 		t.Errorf("expected non-rate-limit error to be printed. Output:\n%s", output)
 	}

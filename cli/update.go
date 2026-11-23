@@ -15,19 +15,26 @@ import (
 // updatableSources maps bulk-index source names to a forced refresh. Each
 // updater wipes its cached snapshot and rebuilds it from upstream.
 func updatableSources(cacheDB *db.DB) map[string]func(ctx context.Context) (int, error) {
-	updaters := map[string]poc.ForceUpdater{
-		"exploitdb":       poc.NewExploitDB(cacheDB),
-		"trickest":        poc.NewTrickest(cacheDB),
-		"metasploit":      poc.NewMetasploit(cacheDB),
-		"nuclei":          poc.NewNuclei(cacheDB),
-		"tg12":            poc.NewTg12(cacheDB),
-		"awesome-cve-poc": poc.NewAwesomeCVEPOC(cacheDB),
+	updaters := map[string]func(ctx context.Context) (int, error){
+		"exploitdb":       poc.NewExploitDB(cacheDB).ForceUpdate,
+		"trickest":        poc.NewTrickest(cacheDB).ForceUpdate,
+		"metasploit":      poc.NewMetasploit(cacheDB).ForceUpdate,
+		"nuclei":          poc.NewNuclei(cacheDB).ForceUpdate,
+		"tg12":            poc.NewTg12(cacheDB).ForceUpdate,
+		"awesome-cve-poc": poc.NewAwesomeCVEPOC(cacheDB).ForceUpdate,
+		"vulncheck-kev": func(ctx context.Context) (int, error) {
+			entries, err := poc.VulnCheckKEV{APIKey: vulncheckToken()}.FetchAll(ctx)
+			if err != nil {
+				return 0, err
+			}
+			var ids []string
+			for _, e := range entries {
+				ids = append(ids, e.CVE...)
+			}
+			return cacheDB.CVEKEVMark(ids, time.Now())
+		},
 	}
-	out := make(map[string]func(ctx context.Context) (int, error), len(updaters))
-	for name, src := range updaters {
-		out[name] = src.ForceUpdate
-	}
-	return out
+	return updaters
 }
 
 func newUpdateCommand() *cobra.Command {
