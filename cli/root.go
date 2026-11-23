@@ -30,7 +30,36 @@ const (
 	colorGreen  = "\033[32m"
 	colorYellow = "\033[33m"
 	colorRed    = "\033[31m"
+	colorBold   = "\033[1m"
 )
+
+// colorEnabled is true only when stdout is an interactive terminal and the
+// user has not forced colors off with NO_COLOR. Piped/redirected output stays
+// plain and stable so it can be parsed or archived safely.
+var colorEnabled = detectColor()
+
+func detectColor() bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	if os.Getenv("FORCE_COLOR") != "" {
+		return true
+	}
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// paint wraps s in an ANSI code when colors are enabled; otherwise s is
+// returned untouched.
+func paint(code, s string) string {
+	if !colorEnabled {
+		return s
+	}
+	return code + s + colorReset
+}
 
 type options struct {
 	pocMode    bool
@@ -785,20 +814,21 @@ func printCVEFindings(source string, findings []cve.Finding, showScore bool, kev
 			detailW = 20
 		}
 
-		fmt.Printf("%-*s%*s%*s  %s\n", cveW, "CVE", srcW+gap, "SOURCE", scoreW+gap, "SCORE", "DETAIL")
-		fmt.Printf("%s%s%s  %s\n", strings.Repeat("-", cveW), strings.Repeat("-", srcW+gap), strings.Repeat("-", scoreW+gap), strings.Repeat("-", detailW))
+		fmt.Printf("%s\n", paint(colorBold, fmt.Sprintf("%-*s%*s%*s  %s", cveW, "CVE", srcW+gap, "SOURCE", scoreW+gap, "SCORE", "DETAIL")))
+		fmt.Printf("%s\n", strings.Repeat("─", cveW+gap+srcW+gap+scoreW+gap+detailW))
 
 		for _, f := range findings {
 			detail := strings.ReplaceAll(f.Detail, "\n", " ")
 			detail = strings.ReplaceAll(detail, "\r", "")
 			if kev[f.CVE] {
-				detail = "[KEV] " + detail
+				detail = paint(colorRed, "[KEV]") + " " + detail
 			}
 			lines := wrapText(detail, detailW)
 			score := fmt.Sprintf("%.1f", f.Score)
+			colored := paint(scoreColor(f.Score), score)
 			for i, line := range lines {
 				if i == 0 {
-					fmt.Printf("%-*s%*s%*s  %s\n", cveW, f.CVE, srcW+gap, f.Source, scoreW+gap, score, line)
+					fmt.Printf("%-*s%*s%*s  %s\n", cveW, f.CVE, srcW+gap, f.Source, scoreW+gap, colored, line)
 				} else {
 					fmt.Printf("%-*s%*s%*s  %s\n", cveW, "", srcW+gap, "", scoreW+gap, "", line)
 				}
@@ -812,8 +842,8 @@ func printCVEFindings(source string, findings []cve.Finding, showScore bool, kev
 		detailW = 20
 	}
 
-	fmt.Printf("%-*s%*s  %s\n", cveW, "CVE", srcW+gap, "SOURCE", "DETAIL")
-	fmt.Printf("%s%s  %s\n", strings.Repeat("-", cveW), strings.Repeat("-", srcW+gap), strings.Repeat("-", detailW))
+	fmt.Printf("%s\n", paint(colorBold, fmt.Sprintf("%-*s%*s  %s", cveW, "CVE", srcW+gap, "SOURCE", "DETAIL")))
+	fmt.Printf("%s%s\n", strings.Repeat("─", cveW), strings.Repeat("─", srcW+gap))
 
 	for _, f := range findings {
 		detail := strings.ReplaceAll(f.Detail, "\n", " ")
@@ -835,7 +865,7 @@ func printCVEFindings(source string, findings []cve.Finding, showScore bool, kev
 func printPOCFindings(source string, findings []poc.Finding) {
 	successf("%s: %d POCs", source, len(findings))
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "CVE\tSOURCE\tOWNER\tPUSHED AT\tPOC")
+	fmt.Fprintln(w, paint(colorBold, "CVE")+"\t"+paint(colorBold, "SOURCE")+"\t"+paint(colorBold, "OWNER")+"\t"+paint(colorBold, "PUSHED AT")+"\t"+paint(colorBold, "POC"))
 	for _, finding := range findings {
 		src := finding.Source
 		if src == "" {
@@ -876,19 +906,19 @@ func diagWriter() io.Writer {
 }
 
 func progressf(format string, args ...interface{}) {
-	fmt.Fprintf(diagWriter(), "%s[*]%s %s\n", colorCyan, colorReset, fmt.Sprintf(format, args...))
+	fmt.Fprintf(diagWriter(), "%s %s\n", paint(colorCyan, "[*]"), fmt.Sprintf(format, args...))
 }
 
 func successf(format string, args ...interface{}) {
-	fmt.Fprintf(diagWriter(), "%s[+]%s %s\n", colorGreen, colorReset, fmt.Sprintf(format, args...))
+	fmt.Fprintf(diagWriter(), "%s %s\n", paint(colorGreen, "[+]"), fmt.Sprintf(format, args...))
 }
 
 func warnf(format string, args ...interface{}) {
-	fmt.Fprintf(diagWriter(), "%s[-]%s %s\n", colorYellow, colorReset, fmt.Sprintf(format, args...))
+	fmt.Fprintf(diagWriter(), "%s %s\n", paint(colorYellow, "[-]"), fmt.Sprintf(format, args...))
 }
 
 func errorf(format string, args ...interface{}) {
-	fmt.Fprintf(diagWriter(), "%s[!]%s %s\n", colorRed, colorReset, fmt.Sprintf(format, args...))
+	fmt.Fprintf(diagWriter(), "%s %s\n", paint(colorRed, "[!]"), fmt.Sprintf(format, args...))
 }
 
 type winsize struct {
@@ -898,18 +928,47 @@ type winsize struct {
 	Ypixel uint16
 }
 
+// terminalWidth returns the terminal width for interactive output, or a
+// stable default for piped/redirected output so wrapping stays predictable.
 func terminalWidth() int {
 	if cols := os.Getenv("COLUMNS"); cols != "" {
 		if w, err := strconv.Atoi(cols); err == nil && w > 0 {
 			return w
 		}
 	}
+	fi, err := os.Stdout.Stat()
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return 120 // not a terminal: fixed width keeps piped output stable
+	}
 	ws := &winsize{}
 	ret, _, _ := syscall.Syscall(syscall.SYS_IOCTL, os.Stdout.Fd(), syscall.TIOCGWINSZ, uintptr(unsafe.Pointer(ws)))
 	if ret >= 0 && ws.Col > 0 {
 		return int(ws.Col)
 	}
-	return 80
+	return 120
+}
+
+// scoreColor picks the severity color for a CVSS base score:
+// red (critical/high >= 9), orange (high >= 7), yellow (medium >= 4),
+// default otherwise. Plain when colors are disabled.
+func scoreColor(score float64) string {
+	switch {
+	case score >= 9.0:
+		return colorRed
+	case score >= 7.0:
+		return "\033[38;5;208m" // orange
+	case score >= 4.0:
+		return colorYellow
+	default:
+		return ""
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func wrapText(s string, width int) []string {
