@@ -5,7 +5,7 @@
 CLI tool to discover CVEs and hunt public POCs, free-form search or structured product/version queries.
 
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-Unlicense-blue)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/Fakechippies/pochunter?color=green)](https://github.com/Fakechippies/pochunter/releases)
 
 ## Demo
@@ -248,7 +248,3 @@ versioncanon.ExactVariants("2.2.0")                        // zero-padding + wil
 ## Disclaimer
 
 pochunter aggregates publicly available vulnerability and exploit information for defensive research and authorized testing. You are responsible for complying with the terms of the upstream data sources and for what you do with this tool.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
