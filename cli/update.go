@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -12,36 +13,69 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// updatableSources maps bulk-index source names to a forced refresh. Each
-// updater wipes its cached snapshot and rebuilds it from upstream.
-func updatableSources(cacheDB *db.DB) map[string]func(ctx context.Context) (int, error) {
-	updaters := map[string]func(ctx context.Context) (int, error){
-		"exploitdb":       poc.NewExploitDB(cacheDB).ForceUpdate,
-		"trickest":        poc.NewTrickest(cacheDB).ForceUpdate,
-		"metasploit":      poc.NewMetasploit(cacheDB).ForceUpdate,
-		"nuclei":          poc.NewNuclei(cacheDB).ForceUpdate,
-		"tg12":            poc.NewTg12(cacheDB).ForceUpdate,
-		"awesome-cve-poc": poc.NewAwesomeCVEPOC(cacheDB).ForceUpdate,
-		"vulncheck-kev": func(ctx context.Context) (int, error) {
-			entries, err := poc.VulnCheckKEV{APIKey: vulncheckToken()}.FetchAll(ctx)
-			if err != nil {
-				return 0, err
-			}
-			var ids []string
-			for _, e := range entries {
-				ids = append(ids, e.CVE...)
-			}
-			return cacheDB.CVEKEVMark(ids, time.Now())
+// updaterPair bundles the two refresh modes: force always re-downloads;
+// smart skips sources whose snapshot is still fresh (bare `pochunter update`).
+type updaterPair struct {
+	force func(ctx context.Context) (int, error)
+	smart func(ctx context.Context) (int, error)
+}
+
+// updatableSources maps bulk-index source names to their refreshers.
+// Named updates force; bare updates use smart, which skips fresh snapshots.
+func updatableSources(cacheDB *db.DB) map[string]updaterPair {
+	bulkSmart := func(src *poc.BulkSource) func(ctx context.Context) (int, error) {
+		return src.RefreshIfStale
+	}
+	kevForce := func(ctx context.Context) (int, error) {
+		entries, err := poc.VulnCheckKEV{APIKey: vulncheckToken()}.FetchAll(ctx)
+		if err != nil {
+			return 0, err
+		}
+		var ids []string
+		for _, e := range entries {
+			ids = append(ids, e.CVE...)
+		}
+		n, err := cacheDB.CVEKEVMark(ids, time.Now())
+		if err != nil {
+			return 0, err
+		}
+		return n, cacheDB.SetIndexRev("vulncheck-kev", "api", time.Now())
+	}
+	cpesForce := func(ctx context.Context) (int, error) {
+		entries, err := cpe.FetchDictionary(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if err := cacheDB.StoreCPEs(entries); err != nil {
+			return 0, err
+		}
+		return len(entries), cacheDB.CPEMarkRefreshed(time.Now())
+	}
+
+	updaters := map[string]updaterPair{
+		"exploitdb":       {poc.NewExploitDB(cacheDB).ForceUpdate, bulkSmart(&poc.NewExploitDB(cacheDB).BulkSource)},
+		"trickest":        {poc.NewTrickest(cacheDB).ForceUpdate, bulkSmart(&poc.NewTrickest(cacheDB).BulkSource)},
+		"metasploit":      {poc.NewMetasploit(cacheDB).ForceUpdate, bulkSmart(&poc.NewMetasploit(cacheDB).BulkSource)},
+		"nuclei":          {poc.NewNuclei(cacheDB).ForceUpdate, bulkSmart(&poc.NewNuclei(cacheDB).BulkSource)},
+		"tg12":            {poc.NewTg12(cacheDB).ForceUpdate, bulkSmart(&poc.NewTg12(cacheDB).BulkSource)},
+		"awesome-cve-poc": {poc.NewAwesomeCVEPOC(cacheDB).ForceUpdate, bulkSmart(&poc.NewAwesomeCVEPOC(cacheDB).BulkSource)},
+		"vulncheck-kev": updaterPair{
+			force: kevForce,
+			smart: func(ctx context.Context) (int, error) {
+				if fetchedAt, ok := cacheDB.IndexFetchedAt("vulncheck-kev"); ok && time.Since(fetchedAt) < 24*time.Hour {
+					return 0, poc.ErrUpToDate
+				}
+				return kevForce(ctx)
+			},
 		},
-		"cpes": func(ctx context.Context) (int, error) {
-			entries, err := cpe.FetchDictionary(ctx)
-			if err != nil {
-				return 0, err
-			}
-			if err := cacheDB.StoreCPEs(entries); err != nil {
-				return 0, err
-			}
-			return len(entries), cacheDB.CPEMarkRefreshed(time.Now())
+		"cpes": updaterPair{
+			force: cpesForce,
+			smart: func(ctx context.Context) (int, error) {
+				if !cacheDB.CPEStale(24 * time.Hour) {
+					return 0, poc.ErrUpToDate
+				}
+				return cpesForce(ctx)
+			},
 		},
 	}
 	return updaters
@@ -62,6 +96,16 @@ func newUpdateCommand() *cobra.Command {
 			defer cacheDB.Close()
 
 			updaters := updatableSources(cacheDB)
+
+			// Bare `pochunter update` smartly skips fresh snapshots; naming a
+			// source forces a full re-download.
+			forceMode := len(args) > 0
+			pick := func(name string) func(ctx context.Context) (int, error) {
+				if forceMode {
+					return updaters[name].force
+				}
+				return updaters[name].smart
+			}
 
 			var names []string
 			if len(args) == 0 {
@@ -89,7 +133,11 @@ func newUpdateCommand() *cobra.Command {
 
 			var failed bool
 			for _, name := range names {
-				n, err := updaters[name](ctx)
+				n, err := pick(name)(ctx)
+				if errors.Is(err, poc.ErrUpToDate) {
+					successf("%s: up to date", name)
+					continue
+				}
 				if err != nil {
 					failed = true
 					errorf("%s: %v", name, err)

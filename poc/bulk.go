@@ -2,6 +2,7 @@ package poc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -89,6 +90,24 @@ func (b *BulkSource) Query(ctx context.Context, CVE string) ([]Finding, error) {
 		return nil, nil
 	}
 	return findingsFromIndexRows(rows, b.Name), nil
+}
+
+// ErrUpToDate is returned by RefreshIfStale when the index is within its
+// staleness window and does not need a rebuild.
+var ErrUpToDate = errors.New("up to date")
+
+// RefreshIfStale checks the index against its staleness window: inside it,
+// nothing happens; outside it, a cheap revision probe decides whether a
+// rebuild is needed at all. Used by bare `pochunter update`; named updates
+// call ForceUpdate instead.
+func (b *BulkSource) RefreshIfStale(ctx context.Context) (int, error) {
+	if !b.indexStale() {
+		return 0, ErrUpToDate
+	}
+	if err := b.ensureIndex(ctx); err != nil {
+		return 0, err
+	}
+	return b.DB.IndexCount(b.Name)
 }
 
 // ForceUpdate unconditionally re-downloads and rebuilds the index, ignoring

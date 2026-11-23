@@ -139,6 +139,17 @@ func (d *DB) EvictStalePOCs(ttl time.Duration, now time.Time) error {
 	return nil
 }
 
+// IndexCount returns the number of CVE-to-POC links stored for a bulk-index
+// source.
+func (d *DB) IndexCount(source string) (int, error) {
+	var n int
+	err := d.sql.QueryRow("SELECT COUNT(*) FROM index_pocs WHERE source = ?", source).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("db: index count: %w", err)
+	}
+	return n, nil
+}
+
 // IndexRev returns the stored upstream revision of a bulk-index source, if
 // one has ever been recorded.
 func (d *DB) IndexRev(source string) (string, bool) {
