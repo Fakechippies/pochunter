@@ -1,4 +1,4 @@
-module github.com/Fakechippies/POC-Hunter
+module github.com/Fakechippies/pochunter
 
 go 1.26.4
 

@@ -13,12 +13,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Fakechippies/POC-Hunter/db"
-	"github.com/Fakechippies/POC-Hunter/versioncanon"
+	"github.com/Fakechippies/pochunter/db"
+	"github.com/Fakechippies/pochunter/versioncanon"
 	"github.com/spf13/cobra"
 )
 
-const repoReleasesAPI = "https://api.github.com/repos/Fakechippies/POC-Hunter/releases/latest"
+const repoReleasesAPI = "https://api.github.com/repos/Fakechippies/pochunter/releases/latest"
 
 func newSelfUpdateCommand() *cobra.Command {
 	return &cobra.Command{

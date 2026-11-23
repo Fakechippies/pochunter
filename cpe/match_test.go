@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Fakechippies/POC-Hunter/db"
+	"github.com/Fakechippies/pochunter/db"
 )
 
 func testEntries() []entry {

@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/Fakechippies/POC-Hunter/db"
+	"github.com/Fakechippies/pochunter/db"
 )
 
 func openBulkDB(t *testing.T) *db.DB {

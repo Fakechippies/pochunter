@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/Fakechippies/POC-Hunter/db"
+	"github.com/Fakechippies/pochunter/db"
 )
 
 const nucleiURL = "https://raw.githubusercontent.com/projectdiscovery/nuclei-templates/main/cves.json"

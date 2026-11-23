@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Fakechippies/POC-Hunter/db"
+	"github.com/Fakechippies/pochunter/db"
 )
 
 // DefaultMaxIndexAge is how long a built bulk index is trusted without a

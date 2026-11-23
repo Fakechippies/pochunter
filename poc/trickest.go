@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Fakechippies/POC-Hunter/db"
+	"github.com/Fakechippies/pochunter/db"
 )
 
 const trickestURL = "https://raw.githubusercontent.com/trickest/cve/main/github.txt"

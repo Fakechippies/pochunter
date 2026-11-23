@@ -5,9 +5,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/Fakechippies/POC-Hunter/db"
+	"github.com/Fakechippies/pochunter/db"
 
-	"github.com/Fakechippies/POC-Hunter/versioncanon"
+	"github.com/Fakechippies/pochunter/versioncanon"
 )
 
 var (

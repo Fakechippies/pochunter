@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Fakechippies/POC-Hunter/db"
+	"github.com/Fakechippies/pochunter/db"
 )
 
 // ResolveThreshold is the minimum similarity score for a CPE match to be

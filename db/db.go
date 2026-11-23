@@ -17,7 +17,7 @@ import (
 // AppVersion is recorded with the cache so derived data can be invalidated
 // when the binary is replaced by a release. Overridable at build time:
 //
-//	go build -ldflags "-X github.com/Fakechippies/POC-Hunter/db.AppVersion=v1.2.3"
+//	go build -ldflags "-X github.com/Fakechippies/pochunter/db.AppVersion=v1.2.3"
 var AppVersion = "dev"
 
 // DB wraps a SQLite database handle. modernc.org/sqlite supports a single

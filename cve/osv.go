@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Fakechippies/POC-Hunter/httpclient"
+	"github.com/Fakechippies/pochunter/httpclient"
 )
 
 type OSVSource struct{}

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Fakechippies/POC-Hunter/httpclient"
-	"github.com/Fakechippies/POC-Hunter/versioncanon"
+	"github.com/Fakechippies/pochunter/httpclient"
+	"github.com/Fakechippies/pochunter/versioncanon"
 )
 
 type CIRCLSource struct{}

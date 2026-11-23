@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Fakechippies/POC-Hunter/cve"
-	"github.com/Fakechippies/POC-Hunter/db"
+	"github.com/Fakechippies/pochunter/cve"
+	"github.com/Fakechippies/pochunter/db"
 )
 
 type fakeCVESource struct {

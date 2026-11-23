@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Fakechippies/POC-Hunter/cli"
+	"github.com/Fakechippies/pochunter/cli"
 )
 
 func main() {

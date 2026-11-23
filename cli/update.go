@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Fakechippies/POC-Hunter/cpe"
-	"github.com/Fakechippies/POC-Hunter/db"
-	"github.com/Fakechippies/POC-Hunter/poc"
+	"github.com/Fakechippies/pochunter/cpe"
+	"github.com/Fakechippies/pochunter/db"
+	"github.com/Fakechippies/pochunter/poc"
 	"github.com/spf13/cobra"
 )
 

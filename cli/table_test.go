@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Fakechippies/POC-Hunter/poc"
+	"github.com/Fakechippies/pochunter/poc"
 )
 
 var ansiRe = regexp.MustCompile(`\033\[[0-9;]*m`)

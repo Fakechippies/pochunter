@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Fakechippies/POC-Hunter/cve"
-	"github.com/Fakechippies/POC-Hunter/poc"
+	"github.com/Fakechippies/pochunter/cve"
+	"github.com/Fakechippies/pochunter/poc"
 )
 
 func TestResolveSearchInput(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Fakechippies/POC-Hunter/db"
+	"github.com/Fakechippies/pochunter/db"
 )
 
 type fakeSource struct {

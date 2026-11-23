@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Fakechippies/POC-Hunter/db"
+	"github.com/Fakechippies/pochunter/db"
 )
 
 const awesomeURLBase = "https://raw.githubusercontent.com/hackthacker-sec/Awesome-CVE-POC-Index/main/cve_"

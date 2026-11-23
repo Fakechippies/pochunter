@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Fakechippies/POC-Hunter/db"
-	"github.com/Fakechippies/POC-Hunter/httpclient"
+	"github.com/Fakechippies/pochunter/db"
+	"github.com/Fakechippies/pochunter/httpclient"
 )
 
 const vulncheckBaseURL = "https://api.vulncheck.com/v3/index/"

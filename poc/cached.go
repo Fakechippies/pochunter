@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/Fakechippies/POC-Hunter/db"
+	"github.com/Fakechippies/pochunter/db"
 )
 
 // CachedSource wraps a Source with SQLite-backed caching. Findings are

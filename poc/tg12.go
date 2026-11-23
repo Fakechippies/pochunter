@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/Fakechippies/POC-Hunter/db"
+	"github.com/Fakechippies/pochunter/db"
 )
 
 const tg12URL = "https://raw.githubusercontent.com/tg12/PoC_CVEs/main/cve_links.txt"

@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/Fakechippies/POC-Hunter/db"
-	"github.com/Fakechippies/POC-Hunter/httpclient"
+	"github.com/Fakechippies/pochunter/db"
+	"github.com/Fakechippies/pochunter/httpclient"
 )
 
 type SearchVulns struct {

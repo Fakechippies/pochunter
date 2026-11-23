@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/Fakechippies/POC-Hunter/httpclient"
+	"github.com/Fakechippies/pochunter/httpclient"
 )
 
 type GithubSource struct {

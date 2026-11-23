@@ -1,12 +1,12 @@
-# POC-Hunter
+# pochunter
 
-![POC-Hunter banner](assets/banner.png)
+![pochunter banner](assets/banner.png)
 
 CLI tool to discover CVEs and hunt public POCs, free-form search or structured product/version queries.
 
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/Fakechippies/POC-Hunter?color=green)](https://github.com/Fakechippies/POC-Hunter/releases)
+[![Release](https://img.shields.io/github/v/release/Fakechippies/pochunter?color=green)](https://github.com/Fakechippies/pochunter/releases)
 
 ## Demo
 
@@ -33,13 +33,13 @@ From a release (recommended):
 
 ```bash
 # grab the latest binary for your OS/arch from the releases page
-# https://github.com/Fakechippies/POC-Hunter/releases
+# https://github.com/Fakechippies/pochunter/releases
 ```
 
 From source:
 
 ```bash
-go install github.com/Fakechippies/POC-Hunter/cmd/pochunter@latest
+go install github.com/Fakechippies/pochunter/cmd/pochunter@latest
 ```
 
 ## Quick start
@@ -55,7 +55,7 @@ pochunter update                            # refresh cached data sources
 
 ### Modes
 
-**Free-form search (default)** — dump any keywords, no version required. Results are sorted by CVSS score. Pass the product and version as free-form keywords and POC-Hunter splits them automatically (`--search curl version 7.0` works too).
+**Free-form search (default)** — dump any keywords, no version required. Results are sorted by CVSS score. Pass the product and version as free-form keywords and pochunter splits them automatically (`--search curl version 7.0` works too).
 
 ```bash
 pochunter --search ShellShock
@@ -157,11 +157,11 @@ import (
     "context"
     "time"
 
-    "github.com/Fakechippies/POC-Hunter/cve"
-    "github.com/Fakechippies/POC-Hunter/cpe"
-    "github.com/Fakechippies/POC-Hunter/httpclient"
-    "github.com/Fakechippies/POC-Hunter/poc"
-    "github.com/Fakechippies/POC-Hunter/versioncanon"
+    "github.com/Fakechippies/pochunter/cve"
+    "github.com/Fakechippies/pochunter/cpe"
+    "github.com/Fakechippies/pochunter/httpclient"
+    "github.com/Fakechippies/pochunter/poc"
+    "github.com/Fakechippies/pochunter/versioncanon"
 )
 ```
 
@@ -247,7 +247,7 @@ versioncanon.ExactVariants("2.2.0")                        // zero-padding + wil
 
 ## Disclaimer
 
-POC-Hunter aggregates publicly available vulnerability and exploit information for defensive research and authorized testing. You are responsible for complying with the terms of the upstream data sources and for what you do with this tool.
+pochunter aggregates publicly available vulnerability and exploit information for defensive research and authorized testing. You are responsible for complying with the terms of the upstream data sources and for what you do with this tool.
 
 ## License
 
