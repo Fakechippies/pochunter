@@ -1,0 +1,41 @@
+version: 2
+
+project_name: pochunter
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: pochunter
+    main: ./cmd/pochunter
+    binary: pochunter
+    ldflags:
+      # Stamp the release version; selfupdate compares against this.
+      - -s -w -X github.com/Fakechippies/pochunter/db.AppVersion={{ .Version }}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: pochunter
+    formats: [tar.gz]
+    # Asset names follow pochunter_{os}_{arch}(.tar.gz): the selfupdate
+    # asset picker matches exactly this pattern.
+    name_template: >-
+      {{ .ProjectName }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^wip:"
