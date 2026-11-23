@@ -1,5 +1,7 @@
 # POC-Hunter
 
+![POC-Hunter banner](assets/banner.png)
+
 CLI tool to discover CVEs and hunt public POCs, free-form search or structured product/version queries.
 
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev)
