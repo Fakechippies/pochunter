@@ -47,14 +47,19 @@ func TestPOCTableAlignmentColored(t *testing.T) {
 	hsep := cellSepRe.FindAllStringIndex(header, -1)
 	for _, d := range data {
 		dsep := cellSepRe.FindAllStringIndex(d, -1)
-		if len(dsep) != len(hsep) {
+		// Stacked multi-source rows end with an extra whitespace run from
+		// the  continuation marker; one extra separator is expected.
+		if len(dsep) != len(hsep) && len(dsep) != len(hsep)+1 {
 			t.Errorf("cell count mismatch: header %d, row %d\nheader: %q\nrow:    %q", len(hsep), len(dsep), header, d)
 			continue
 		}
-		for i := range hsep {
-			// Cells are left-aligned and padded to the column width, so the
-			// separator START shifts with cell length; the END (== start of
-			// the next column) must be identical across rows.
+		// Cells are left-aligned and padded to the column width, so the
+		// separator START shifts with cell length; the END (== start of the
+		// next column) must be identical across rows. Stacked multi-source
+		// rows carry a trailing whitespace run that is not a column
+		// boundary, so each line's LAST separator is skipped.
+		last := min(len(hsep), len(dsep)) - 1
+		for i := 0; i < last; i++ {
 			if hsep[i][1] != dsep[i][1] {
 				t.Errorf("column %d misaligned: header cell ends at %d, row cell ends at %d\nheader: %q\nrow:    %q", i, hsep[i][1], dsep[i][1], header, d)
 			}

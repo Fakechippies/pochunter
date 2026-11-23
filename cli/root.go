@@ -953,11 +953,14 @@ func printPOCFindings(source string, findings []poc.Finding) {
 
 	// Write PLAIN text through the tabwriter (escape codes would corrupt its
 	// column math), then paint the flushed lines: header bold, CVE column
-	// bold, SOURCES in the first source's color, owner/date gray.
+	// bold, SOURCES in per-source colors, owner/date gray.
+	//
+	// Rows with several sources stack one source per line in the SOURCES
+	// column (tabwriter \v chaining) so a wide row wins over a long line.
 	var buf bytes.Buffer
 	tw := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "CVE\tSOURCES\tOWNER\tPUSHED AT\tPOC")
-	rowColors := make([]string, 0, len(rows))
+	var lineColors []string // SOURCES-cell color per output line
 	for _, row := range rows {
 		sort.Strings(row.sources)
 		owner, pushedAt := row.owner, row.pushedAt
@@ -967,8 +970,24 @@ func printPOCFindings(source string, findings []poc.Finding) {
 		if pushedAt == "" {
 			pushedAt = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", row.cve, strings.Join(row.sources, ", "), owner, pushedAt, row.url)
-		rowColors = append(rowColors, sourceColor(row.sources[0]))
+		srcs := row.sources
+		if len(srcs) == 1 {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", row.cve, srcs[0], owner, pushedAt, row.url)
+			lineColors = append(lineColors, sourceColor(srcs[0]))
+			continue
+		}
+		// First line carries the row data and ends with \v so the following
+		// lines continue the same columns; the block ends on a \t line.
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\v\n", row.cve, srcs[0], owner, pushedAt, row.url)
+		lineColors = append(lineColors, sourceColor(srcs[0]))
+		for k := 1; k < len(srcs); k++ {
+			if k < len(srcs)-1 {
+				fmt.Fprintf(tw, "\v%s\t\t\t\n", srcs[k])
+			} else {
+				fmt.Fprintf(tw, "\t%s\t\t\t\n", srcs[k])
+			}
+			lineColors = append(lineColors, sourceColor(srcs[k]))
+		}
 	}
 	_ = tw.Flush()
 
@@ -979,21 +998,43 @@ func printPOCFindings(source string, findings []poc.Finding) {
 			continue
 		}
 		cells, seps := splitCells(line)
-		if len(cells) == 5 && len(seps) == 4 {
+		idx := i - 1
+		sourcesColor := ""
+		if idx >= 0 && idx < len(lineColors) {
+			sourcesColor = lineColors[idx]
+		}
+		switch {
+		case (len(cells) == 5 && len(seps) == 4) || (len(cells) == 6 && len(seps) == 5):
+			// Data row: the 6-cell shape is a stacked row's first line whose
+			// trailing empty cell comes from the  continuation marker.
 			var sb strings.Builder
 			sb.WriteString(paint(colorBold, cells[0]))
 			sb.WriteString(seps[0])
-			sb.WriteString(paint(rowColors[i-1], cells[1]))
+			sb.WriteString(paint(sourcesColor, cells[1]))
 			sb.WriteString(seps[1])
 			sb.WriteString(paint(colorGray, cells[2]))
 			sb.WriteString(seps[2])
 			sb.WriteString(paint(colorGray, cells[3]))
 			sb.WriteString(seps[3])
 			sb.WriteString(cells[4])
+			for j := 4; j < len(seps); j++ {
+				sb.WriteString(seps[j])
+				sb.WriteString(cells[j+1])
+			}
 			fmt.Println(sb.String())
-			continue
+		case len(cells) == 3 && len(seps) == 2:
+			// Continuation line of a stacked multi-source row: only the
+			// SOURCES cell carries content.
+			var sb strings.Builder
+			sb.WriteString(cells[0])
+			sb.WriteString(seps[0])
+			sb.WriteString(paint(sourcesColor, cells[1]))
+			sb.WriteString(seps[1])
+			sb.WriteString(cells[2])
+			fmt.Println(sb.String())
+		default:
+			fmt.Println(line)
 		}
-		fmt.Println(line)
 	}
 }
 
