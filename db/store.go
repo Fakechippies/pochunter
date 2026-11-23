@@ -173,6 +173,25 @@ func (d *DB) IndexFetchedAt(source string) (time.Time, bool) {
 	return when, true
 }
 
+// WipeIndex deletes a bulk-index source's snapshot revision and all of its
+// CVE-to-POC rows, forcing a full rebuild on the next use.
+func (d *DB) WipeIndex(source string) error {
+	if source == "" {
+		return fmt.Errorf("db: empty source")
+	}
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+	for _, stmt := range []string{
+		"DELETE FROM indexes WHERE source = ?",
+		"DELETE FROM index_pocs WHERE source = ?",
+	} {
+		if _, err := d.sql.Exec(stmt, source); err != nil {
+			return fmt.Errorf("db: wipe index: %w", err)
+		}
+	}
+	return nil
+}
+
 // IndexPOCRow is one CVE-to-POC link extracted from a bulk-index snapshot.
 type IndexPOCRow struct {
 	CVE      string

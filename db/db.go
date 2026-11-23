@@ -14,11 +14,18 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// AppVersion is recorded with the cache so derived data can be invalidated
+// when the binary is replaced by a release. Overridable at build time:
+//
+//	go build -ldflags "-X github.com/Fakechippies/POC-Hunter/db.AppVersion=v1.2.3"
+var AppVersion = "dev"
+
 // DB wraps a SQLite database handle. modernc.org/sqlite supports a single
 // writer, so writes are serialized through a mutex; reads are concurrent.
 type DB struct {
-	sql     *sql.DB
-	writeMu sync.Mutex
+	sql        *sql.DB
+	writeMu    sync.Mutex
+	appVersion string
 }
 
 const schema = `
@@ -61,11 +68,22 @@ CREATE TABLE IF NOT EXISTS index_pocs(
 	pushed_at TEXT NOT NULL DEFAULT '',
 	UNIQUE (source, cve_id, url)
 );
+
+-- Small key/value store for maintenance state (schema version, the app
+-- version that built the caches, ...).
+CREATE TABLE IF NOT EXISTS meta(
+	key   TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
 `
 
 // Open creates (if necessary) and opens the cache database at path, applies
 // pragmas and ensures the schema exists. The parent directory is created too.
 func Open(path string) (*DB, error) {
+	return openWithVersion(path, AppVersion)
+}
+
+func openWithVersion(path, appVersion string) (*DB, error) {
 	if path == "" {
 		return nil, fmt.Errorf("db: empty database path")
 	}
@@ -97,7 +115,66 @@ func Open(path string) (*DB, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("db: schema: %w", err)
 	}
-	return &DB{sql: sqlDB}, nil
+	d := &DB{sql: sqlDB, appVersion: appVersion}
+	if err := d.refreshMaintenanceState(); err != nil {
+		sqlDB.Close()
+		return nil, err
+	}
+	return d, nil
+}
+
+// schemaVersion identifies the cached-data layout. Bump it when a schema
+// change invalidates derived data; bulk indexes are wiped and rebuilt on
+// mismatch.
+const schemaVersion = "1"
+
+// refreshMaintenanceState wipes derived data when it was built by a
+// different schema or a different app version (a release), so caches are
+// rebuilt from upstream on the next use.
+func (d *DB) refreshMaintenanceState() error {
+	stored, ok, err := d.meta("schema_version")
+	if err != nil {
+		return err
+	}
+	if !ok {
+		// Fresh database: record current state.
+		return d.exec(
+			"INSERT INTO meta(key, value) VALUES ('schema_version', ?), ('built_with', ?)",
+			schemaVersion, d.appVersion,
+		)
+	}
+
+	wipe := false
+	if stored != schemaVersion {
+		wipe = true
+	}
+	if !wipe {
+		if built, ok, err := d.meta("built_with"); err == nil && ok && built != d.appVersion {
+			wipe = true
+		}
+	}
+	if wipe {
+		if err := d.exec("DELETE FROM indexes; DELETE FROM index_pocs"); err != nil {
+			return err
+		}
+	}
+	return d.exec(
+		"INSERT INTO meta(key, value) VALUES ('schema_version', ?), ('built_with', ?)"+
+			" ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+		schemaVersion, d.appVersion,
+	)
+}
+
+func (d *DB) meta(key string) (string, bool, error) {
+	var value string
+	err := d.sql.QueryRow("SELECT value FROM meta WHERE key = ?", key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("db: meta %s: %w", key, err)
+	}
+	return value, true, nil
 }
 
 // Close closes the database handle.

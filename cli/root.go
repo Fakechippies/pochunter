@@ -68,11 +68,12 @@ func Execute() error {
 	rootCmd.Flags().StringSliceVar(&opts.sources, "sources", nil, "CVE sources to use (comma-separated: nvd,circl,osv,vulners,github)")
 	rootCmd.Flags().StringVarP(&opts.output, "output", "o", "table", "output format: table, json, jsonl, csv")
 	rootCmd.Flags().DurationVar(&opts.timeout, "timeout", 30*time.Second, "request timeout")
-	rootCmd.Flags().StringVar(&opts.dbPath, "db", "", "POC cache database path (default: ~/.cache/pochunter/cache.db)")
+	rootCmd.Flags().StringVar(&opts.dbPath, "db", "", "POC cache database path (overrides POCHUNTER_DB; default: os.UserCacheDir()/pochunter/pochunter.db)")
 	rootCmd.Flags().BoolVar(&opts.noCache, "no-cache", false, "disable the local POC cache")
 	rootCmd.Flags().DurationVar(&opts.cacheTTL, "cache-ttl", 24*time.Hour, "cache freshness duration (e.g. 12h, 7d as 168h)")
 
 	rootCmd.SetArgs(normalizeCompatFlags(os.Args[1:]))
+	rootCmd.AddCommand(newUpdateCommand())
 	return rootCmd.Execute()
 }
 
@@ -230,18 +231,31 @@ func buildCVESourcesFromEnv(want []string) []cve.Source {
 	return sources
 }
 
+// resolveDBPath applies the standard precedence for the cache database
+// location: --db flag (highest), POCHUNTER_DB env var, then the default
+// os.UserCacheDir()/pochunter/pochunter.db, which maps to
+// ~/.cache/pochunter/ (Linux), ~/Library/Caches/pochunter/ (macOS) and
+// %LocalAppData%\pochunter\ (Windows).
+func resolveDBPath(flagPath string) string {
+	if p := strings.TrimSpace(flagPath); p != "" {
+		return p
+	}
+	if p := strings.TrimSpace(os.Getenv("POCHUNTER_DB")); p != "" {
+		return p
+	}
+	if base, err := os.UserCacheDir(); err == nil {
+		return filepath.Join(base, "pochunter", "pochunter.db")
+	}
+	return ""
+}
+
 // openCacheDB opens the shared cache database unless caching is disabled.
 // Failures are reported but never fatal: the tool works without a cache.
 func openCacheDB(opts options) *db.DB {
 	if opts.noCache {
 		return nil
 	}
-	path := strings.TrimSpace(opts.dbPath)
-	if path == "" {
-		if base, err := os.UserCacheDir(); err == nil {
-			path = filepath.Join(base, "pochunter", "cache.db")
-		}
-	}
+	path := resolveDBPath(opts.dbPath)
 	if path == "" {
 		return nil
 	}
