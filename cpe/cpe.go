@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Fakechippies/POC-Hunter/db"
 )
@@ -66,34 +67,24 @@ type cpeAPIPage struct {
 	} `json:"products"`
 }
 
-// fetchCPEDictionary pages the CPE API (max 2000 per page; ~941 pages for
-// 1.88M records) and dedupes to one entry per product prefix.
+// fetchCPEDictionary pages the CPE API and dedupes to one entry per product
+// prefix. The VulnCheck mirror honors large pages (10000 per page → ~190
+// pages for 1.88M records); NVD caps at 2000 per page (~941 pages). Each
+// page is retried on transient errors; progress goes to stderr.
 func fetchCPEDictionary(ctx context.Context, baseURL string, headers map[string]string) ([]db.CPEEntry, error) {
-	client := &http.Client{}
+	client := &http.Client{Timeout: 5 * time.Minute}
 	dedup := map[string]*db.CPEEntry{}
 
-	const perPage = 2000
+	perPage := 2000
+	if strings.Contains(baseURL, "vulncheck.com") {
+		perPage = 10000
+	}
 	start := 0
-	for {
+	for pageNo := 1; ; pageNo++ {
 		url := fmt.Sprintf("%s?resultsPerPage=%d&startIndex=%d", baseURL, perPage, start)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		body, err := fetchPageWithRetry(ctx, client, url, headers)
 		if err != nil {
 			return nil, err
-		}
-		for k, v := range headers {
-			req.Header.Set(k, v)
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return nil, err
-		}
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("status %d at startIndex=%d", resp.StatusCode, start)
 		}
 
 		var page cpeAPIPage
@@ -125,7 +116,9 @@ func fetchCPEDictionary(ctx context.Context, baseURL string, headers map[string]
 				}
 			}
 		}
+		fmt.Fprintf(os.Stderr, "\rcpes: page %d, %d unique products (total %d)", pageNo, len(dedup), page.TotalResults)
 		if len(page.Products) == 0 || start+len(page.Products) >= page.TotalResults {
+			fmt.Fprintln(os.Stderr)
 			break
 		}
 		start += len(page.Products)
@@ -136,6 +129,47 @@ func fetchCPEDictionary(ctx context.Context, baseURL string, headers map[string]
 		entries = append(entries, *e)
 	}
 	return entries, nil
+}
+
+// fetchPageWithRetry GETs one API page, retrying transient failures.
+func fetchPageWithRetry(ctx context.Context, client *http.Client, url string, headers map[string]string) ([]byte, error) {
+	var lastErr error
+	for attempt := 0; attempt < 4; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * 2 * time.Second):
+			}
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("status %d", resp.StatusCode)
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("status %d for %s", resp.StatusCode, url)
+		}
+		return body, nil
+	}
+	return nil, lastErr
 }
 
 // cpePrefix returns the first five components of a CPE 2.3 name

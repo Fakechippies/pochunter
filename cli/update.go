@@ -82,9 +82,9 @@ func newUpdateCommand() *cobra.Command {
 				}
 			}
 
-			// Bulk indexes are tens of MB; give the refresh a generous budget
-			// independent of the per-request --timeout.
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			// Bulk indexes (the CPE dictionary alone is ~190 API pages) need a
+			// generous budget independent of the per-request --timeout.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 			defer cancel()
 
 			var failed bool
