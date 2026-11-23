@@ -2,129 +2,105 @@
 
 CLI tool to discover CVEs and hunt public POCs, free-form search or structured product/version queries.
 
-## What it does
+<!-- DEMO GIF: add your demo gif right here, e.g.
+![POC-Hunter demo](docs/demo.gif)
+-->
 
-- CVE discovery from **NVD**, **CIRCL**, **OSV**, **Vulners**, and **GitHub Advisories**
-- All CVE sources queried concurrently, results deduplicated
-- POC discovery from **poc-in-github** and **search-vulns** with a configurable worker pool (max 8)
-- Direct POC mode with `--poc` / `-poc`
-- **Version canonicalization** — detects, extracts, and compares software versions (e.g. `7.0`, `8.5p1`, `v1.2.3`)
-- **CPE-based filtering** — NVD checks CPE configurations (version ranges, vendor/product fields) to eliminate false positives
-- **Rate-limit suppression** — duplicate 429 warnings are printed only once per source; rate-limited sources are skipped
-- Exact variant matching in descriptions (zero-padding and same-length wildcards) on token boundaries, so `7.0` never matches `7.57.0`
-- Selectable CVE sources via `--sources` flag
-- CVSS scoring: free-form search results sorted by score with a SCORE column
-- Terminal width auto-detection (ioctl TIOCGWINSZ) for full-screen table output
-- Word-splitting fallback: if multi-word search returns 0 results, each word is tried individually
-- CVE nickname aliases: common names like `shellshock`, `heartbleed`, `logjam` mapped to their product names
-- Auto-detects version in free-form queries (e.g. `--search curl 7.0` splits into product=`curl`, version=`7.0`)
-- Proper table formatting with word-wrapped DETAIL column
-- Vulners source uses `/api/v4/audit/software` (CPE-based, partial match, extended catalog)
+[![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/Fakechippies/POC-Hunter?color=green)](https://github.com/Fakechippies/POC-Hunter/releases)
+
+## Demo
+
+<!-- Leave this section exactly as-is until the gif is ready; it is intentionally empty. -->
+
+## Features
+
+- **CVE discovery** from NVD, CIRCL, OSV, Vulners, and GitHub Advisories — all queried concurrently, deduplicated
+- **Query → CPE resolution**: free-form queries ("apache http server 2.4.39") are resolved against the official CPE Dictionary, then NVD is queried by exact `cpeName`/`virtualMatchString` instead of keywords — no keyword false positives ("curl 7.0" never matches SQL Server 7.0)
+- **POC discovery** from a dozen sources with a configurable worker pool: poc-in-github, search-vulns, ExploitDB, trickest/cve, Metasploit, Nuclei templates, tg12/PoC_CVEs, Awesome-CVE-POC-Index, VulnCheck XDB/Initial Access
+- **Local SQLite cache**: POC results, CVE metadata (with KEV flags), and bulk indexes are cached in a single database with TTLs, revision checks, and forced refresh via `pochunter update`
+- **KEV enrichment**: CISA/VulnCheck Known Exploited Vulnerabilities flagged with a red `[KEV]` marker
+- **Version canonicalization**: detects, extracts, and compares software versions (`7.0`, `8.5p1`, `v1.2.3`, `20.0-u1559`, `7.0a1`)
+- **CPE-based filtering**: NVD results are filtered against CPE configurations (version ranges, vendor/product fields)
+- **Match reasons**: every CVE finding is labeled (`cpe_version`, `version_in_range`, `cpe_product`, `description`) and exposed in machine-readable output
+- **Rate-limit suppression**: duplicate 429 warnings print once per source; source errors are hidden by default and shown with `-v`
+- **TTY-aware output**: colors, bold headers, and severity-colored scores in the terminal; plain, stable-width output when piped (`NO_COLOR`/`FORCE_COLOR` honored)
+- Exact variant matching in descriptions (zero-padding and same-length wildcards on token boundaries), so `7.0` never matches `7.57.0`
+- CVE nickname aliases: `shellshock`, `heartbleed`, `logjam` and friends map to their product names
 
 ## Install
+
+From a release (recommended):
+
+```bash
+# grab the latest binary for your OS/arch from the releases page
+# https://github.com/Fakechippies/POC-Hunter/releases
+```
+
+From source:
 
 ```bash
 go install github.com/Fakechippies/POC-Hunter/cmd/pochunter@latest
 ```
 
-Then run:
+## Quick start
 
 ```bash
-pochunter --search <keywords...>
+pochunter --search curl 7.0                 # free-form search, version auto-detected
+pochunter --app django --version 3.2        # structured product/version query
+pochunter -poc CVE-2026-38526               # hunt POCs for a known CVE
+pochunter update                            # refresh cached data sources
 ```
 
-## Modes
+## Usage
 
-### 1) Free-form search (default)
+### Modes
 
-Dump any keywords: no version required. Results are sorted by CVSS score (highest first) and include a SCORE column. Known CVE nicknames like `shellshock`, `heartbleed`, `logjam`, `spectre`, `meltdown` are automatically mapped to their product names.
-
-**Version auto-detection:** pass the product and version as free-form keywords and POC-Hunter automatically splits them into a structured product/version query.
+**Free-form search (default)** — dump any keywords, no version required. Results are sorted by CVSS score. Pass the product and version as free-form keywords and POC-Hunter splits them automatically (`--search curl version 7.0` works too).
 
 ```bash
-go run ./cmd/pochunter --search ShellShock
-go run ./cmd/pochunter --search shellshock 4.3 bash
-go run ./cmd/pochunter --search log4j
-go run ./cmd/pochunter --search Krayin CRM 2.20 --vendor Webkul --ecosystem php
-go run ./cmd/pochunter --search django 4.2 --sources nvd,vulners
-# Auto-detects "curl" and "7.0" from free-form input
-go run ./cmd/pochunter --search curl 7.0
-# Also handles prefix words: "curl version 7.0"
-go run ./cmd/pochunter --search curl version 7.0
+pochunter --search ShellShock
+pochunter --search log4j
+pochunter --search Krayin CRM 2.20 --vendor Webkul --ecosystem php
 ```
 
-### 2) Structured product/version mode
-
-For precise product/version lookups:
+**Structured product/version mode** — for precise lookups:
 
 ```bash
-go run ./cmd/pochunter --app django --version 3.2 --ecosystem PyPI --timeout 20s
-go run ./cmd/pochunter --app "<APP-NAME>" --version <VERSION>
+pochunter --app django --version 3.2 --ecosystem PyPI --timeout 20s
 ```
 
-Optional source hints for either mode:
+**Direct POC mode** — skip CVE discovery, search POCs by CVE ID:
+
+```bash
+pochunter -poc CVE-2026-38526
+pochunter -poc CVE 2026 38526
+```
+
+### Flags
 
 | Flag | Description |
 |------|-------------|
+| `--search` | Free-form keyword search (no version required) |
+| `--poc` / `-poc` | Direct POC mode (CVE ID input) |
+| `--app` | Application/product name (structured mode) |
+| `--version` | Application version (structured mode) |
 | `--vendor` | Vendor name (search hint) |
-| `--ecosystem` | Package ecosystem (`npm`, `pypi`, `go`, `maven`, etc.) |
+| `--ecosystem` | Package ecosystem (`npm`, `pypi`, `go`, `maven`, `rubygems`, ...) |
 | `--sources` | Comma-separated CVE sources (`nvd,circl,osv,vulners,github`) |
+| `--output` / `-o` | Output format: `table` (default), `json`, `jsonl`, `csv` |
+| `--timeout` | Request timeout (default 30s) |
+| `--db` | Cache database path (overrides `POCHUNTER_DB`) |
+| `--no-cache` | Disable all local caching |
+| `--refresh` | Bypass cache reads but still write |
+| `--cache-ttl` | POC cache freshness (default 24h) |
+| `--cve-ttl` | CVE query cache freshness (default 30m) |
+| `-v` / `--verbose` | Show per-source API errors (hidden by default) |
 
-Optional API-backed CVE sources:
+### Output formats
 
-```bash
-export VULNERS_API_KEY="<your-vulners-key>"
-export GITHUB_TOKEN="<your-github-token>"
-```
-
-These are automatically included when their env var is set, and can be filtered with `--sources`.
-
-Optional API-backed POC sources:
-
-```bash
-export SEARCHVULNS_API_KEY="<your-search-vulns-key>"
-```
-
-Automatically included when the env var is set.
-
-### 2) Direct POC mode
-
-Skip CVE discovery and directly search POCs by CVE ID.
-
-```bash
-go run ./cmd/pochunter -poc CVE-2026-38526
-go run ./cmd/pochunter -poc CVE 2026 38526
-```
-
-## Available CVE sources
-
-| Flag     | Source            | Auth              | Notes |
-|----------|-------------------|-------------------|-------|
-| `nvd`    | NVD API 2.0       | None              | CPE configuration parsing with version range filtering (startInc, endExc, etc.). Product matching via normalized vendor/product fields. False positives prevented (e.g. "curl 7.0" won't match SQL Server 7.0). |
-| `circl`  | CIRCL CVE search  | None              | Queries `cve.circl.lu/api/search/{vendor}/{product}`. Falls back to `vendor=product` if vendor is empty. Auto-extracts version from product string. |
-| `osv`    | OSV.dev           | None              | Package-ecosystem based. **Requires `--ecosystem`**. POSTs version+package to `api.osv.dev/v1/query`. Resolves aliases to CVEs. |
-| `vulners`| Vulners v4 audit  | `VULNERS_API_KEY` | Uses `POST /api/v4/audit/software` with structured CPE objects (`"match": "partial"`, `"catalog": "extended"`). Auto-extracts version from product string. |
-| `github` | GitHub Advisories | `GITHUB_TOKEN`    | **Requires `--ecosystem`**. Queries `api.github.com/advisories` with ecosystem+package filter. |
-
-## Flags
-
-| Flag             | Description                                      |
-|------------------|--------------------------------------------------|
-| `--search`       | Free-form keyword search (no version required)   |
-| `--poc` / `-poc` | Direct POC mode (CVE ID input)                   |
-| `--app`          | Application/product name (structured mode)       |
-| `--version`      | Application version (structured mode)            |
-| `--vendor`       | Vendor name (search hint)                        |
-| `--ecosystem`    | Package ecosystem (`npm`, `pypi`, `go`, `maven`, `rubygems`, etc.) |
-| `--sources`      | Comma-separated CVE sources to query             |
-| `--output` / `-o`| Output format: `table` (default), `json`, `jsonl`, `csv` |
-| `--timeout`      | Request timeout (default 30s)                    |
-
-## Output formats
-
-`--output` (`-o`) selects the result format. `table` is the default human-readable
-output. The machine-readable formats write results to **stdout** and route progress
-and error messages to **stderr**, so output can be piped straight into `jq` or a file:
+Machine-readable formats write results to **stdout** and route progress/errors to **stderr**, so output pipes straight into `jq` or a file. CSV includes a `match` column with the finding's match reason.
 
 ```bash
 pochunter --search curl 7.0 --output json | jq '.cve_findings[].cve'
@@ -132,24 +108,47 @@ pochunter --search log4j -o jsonl > results.jsonl
 pochunter --app django --version 3.2 --ecosystem PyPI -o csv > django.csv
 ```
 
-- `json` — a single object with `query`, `cve_findings`, `unique_cves`, and `poc_findings` arrays.
-- `jsonl` — newline-delimited records, each with a `type` of `cve` or `poc`.
-- `csv` — one row per finding with columns `type,cve,source,detail,score,owner,pushed_at,poc` (unused columns are left empty).
+## Sources
 
-## CVE discovery 
+| Source | Type | Auth | Notes |
+|--------|------|------|-------|
+| `nvd` | CVE | None / `NVD_API_KEY` / `VULNCHECK_API_TOKEN` | CPE-name queries via local CPE dictionary, CPE config filtering, description fallback. Uses the VulnCheck NVD++ mirror (higher limits, extra enrichment) when its token is set |
+| `circl` | CVE | None | `cve.circl.lu/api/search/{vendor}/{product}` |
+| `osv` | CVE | None | Ecosystem-based (`--ecosystem` required), POST to `api.osv.dev/v1/query` |
+| `vulners` | CVE | `VULNERS_API_KEY` | v4 audit API with structured CPE objects |
+| `github` | CVE | `GITHUB_TOKEN` | GitHub Advisories (`--ecosystem` required) |
+| `poc-in-github` | POC | None | poc-in-github.motikan2010.net API |
+| `search-vulns` | POC | `SEARCHVULNS_API_KEY` | search-vulns.com API |
+| `exploitdb` | POC | None | Bulk: `files_exploits.csv`, ETag-tracked |
+| `trickest` | POC | None | Bulk: `github.txt` CVE→repo links |
+| `metasploit` | POC | None | Bulk: `modules_metadata_base.json` (CVEs from `references[]`) |
+| `nuclei` | POC | None | Bulk: nuclei-templates `cves.json` (NDJSON) |
+| `tg12` | POC | None | Bulk: tg12/PoC_CVEs box-format `cve_links.txt` |
+| `awesome-cve-poc` | POC | None | Bulk: 11 per-year markdown indexes |
+| `vulncheck-xdb` | POC | `VULNCHECK_API_TOKEN` | On-demand API. **Paid index** (402 on community tokens) |
+| `vulncheck-iac` | POC | `VULNCHECK_API_TOKEN` | On-demand API, community tier, ~50 high-quality CVEs |
 
-1. All selected CVE sources are queried **concurrently** via goroutines.
-2. Results are **deduplicated** by CVE + source + detail.
-3. Unique CVE IDs are collected and sorted.
-4. For each unique CVE, all POC sources are queried (worker pool, **max 8** concurrent).
-5. POC findings are flattened and sorted by CVE → owner → URL.
+## Environment variables
 
-## POC sources
+| Variable | Purpose |
+|----------|---------|
+| `VULNCHECK_API_TOKEN` | VulnCheck API (official SDK/CLI name; `VULNCHECK_API_KEY` also accepted). Enables vulncheck-xdb, vulncheck-iac, the NVD++ mirror and the CPE dictionary build |
+| `VULNERS_API_KEY` | Vulners CVE source |
+| `GITHUB_TOKEN` | GitHub Advisories CVE source |
+| `SEARCHVULNS_API_KEY` | search-vulns POC source |
+| `NVD_API_KEY` | NVD API key (CPE dictionary build without a VulnCheck token) |
+| `POCHUNTER_DB` | Cache database path (default `os.UserCacheDir()/pochunter/pochunter.db`) |
+| `NO_COLOR` / `FORCE_COLOR` | Disable/force ANSI colors |
 
-| Source          | Auth                 | Description                                      |
-|-----------------|----------------------|--------------------------------------------------|
-| `poc-in-github` | None                 | Queries `poc-in-github.motikan2010.net/api/v1/?cve_id=` |
-| `search-vulns`  | `SEARCHVULNS_API_KEY`| Queries `search-vulns.com/api/search-vulns?query=` |
+API-keyed sources are included automatically when their env var is set; filter with `--sources`.
+
+## How it works
+
+1. **Resolve input** — free-form queries are split into product/version (`curl 7.0`), aliases expanded (`shellshock` → bash)
+2. **Resolve CPE** — the query is matched against the official CPE Dictionary (cached locally); a confident match switches NVD to exact `cpeName`/`virtualMatchString` queries
+3. **Discover CVEs** — all selected CVE sources are queried concurrently, results deduplicated by CVE+source+detail, labeled with match reasons, sorted by CVSS
+4. **Hunt POCs** — for every unique CVE, all POC sources are queried (worker pool, max 8 concurrent); bulk-index sources answer from the local SQLite cache
+5. **Cache & enrich** — everything lands in one SQLite database (POC findings with TTL, CVE bare info, KEV flags, bulk indexes with revision checks); `pochunter update` force-refreshes, and a new app version automatically invalidates derived data
 
 ## Library usage
 
@@ -161,6 +160,7 @@ import (
     "time"
 
     "github.com/Fakechippies/POC-Hunter/cve"
+    "github.com/Fakechippies/POC-Hunter/cpe"
     "github.com/Fakechippies/POC-Hunter/httpclient"
     "github.com/Fakechippies/POC-Hunter/poc"
     "github.com/Fakechippies/POC-Hunter/versioncanon"
@@ -173,11 +173,11 @@ Query a single CVE source:
 src := cve.NVDSource{}
 findings, err := src.Query(ctx, "", "log4j", "", "")
 for _, f := range findings {
-    fmt.Println(f.CVE, f.Score, f.Detail)
+    fmt.Println(f.CVE, f.Score, f.Reason)
 }
 ```
 
-Query all sources concurrently:
+Query all sources concurrently, then hunt POCs:
 
 ```go
 sources := []cve.Source{
@@ -197,10 +197,14 @@ for _, s := range sources {
 }
 ```
 
-Query POCs for a CVE:
+Query POCs for a CVE (with the SQLite cache decorator):
 
 ```go
-pocSources := []poc.Source{poc.POCInGithub{}}
+cache, _ := db.Open("/path/to/pochunter.db")
+pocSources := []poc.Source{
+    poc.CachedSource{Inner: poc.POCInGithub{}, DB: cache, TTL: 24 * time.Hour},
+    &poc.ExploitDB{BulkSource: poc.BulkSource{DB: cache}},
+}
 for _, src := range pocSources {
     pocs, err := src.Query(ctx, "CVE-2026-38526")
     for _, p := range pocs {
@@ -209,90 +213,44 @@ for _, src := range pocSources {
 }
 ```
 
-### Version canonicalization
-
-The `versioncanon` package provides utilities to work with software versions:
+Resolve a free-form query to a CPE name:
 
 ```go
-// Detect if a token is a version (7.0, 8.5p1, v1.2.3)
-versioncanon.IsVersion("7.0") // true
-versioncanon.IsVersion("curl") // false
-
-// Extract product and version from free-form input
-app, ver := versioncanon.ExtractAppAndVersion("curl 7.0")
-// app="curl", ver="7.0"
-
-// Compare versions: zero-padding and leading zeros ignored,
-// letter releases (OpenSSL 1.1.1k) and pre-releases (2.0.0-rc1) ordered.
-versioncanon.Compare("7.0", "7.0.0")     // 0 (equal)
-versioncanon.Compare("7.0", "7.10.7")    // -1 (7.0 < 7.10.7)
-versioncanon.Compare("1.1.1", "1.1.1k")  // -1 (letter release comes after)
-versioncanon.Compare("2.0.0-rc1", "2.0.0") // -1 (pre-release comes before)
-
-// Check if version falls within a range
-versioncanon.MatchesRange("7.0", "7.0", "", "", "7.15.0") // true ([7.0, 7.15.0))
-versioncanon.MatchesRange("1.1.1k", "", "", "", "1.1.1l") // true (< 1.1.1l)
-
-// Boundary-aware version matching in text; occurrences in negating
-// contexts (before/prior to/fixed in/earlier than/<) are skipped
-versioncanon.MatchVersionInText("curl 7.0 buffer overflow", "7.0") // true
-versioncanon.MatchVersionInText("fixed in curl 7.57.0", "7.57.0") // false
-versioncanon.MatchVersionInText("curl 7.57.0", "7.0") // false (no false positive)
-
-// ExactVariants holds only information-preserving equivalents (zero-padding
-// and same-length wildcards); MatchVersionInText uses these.
-versioncanon.ExactVariants("2.2.0")
-// ["v2.2.0.0", "v2.2.0.x", "2.2.0.0", "2.2.0.x", "v2.2.0", "2.2.0", "v2.2", "2.2"]
-
-// Variants is a superset that also drops non-zero components, for fuzzy/research use.
-versioncanon.Variants("2.2.0") // adds "2.2.x", "2.x", "2", "2.2.*", ...
-
-// MatchVersionInTextAny is the loose counterpart to MatchVersionInText: it also
-// matches coarse/wildcard variants, e.g. "2.2.0" against "v2.2.x".
-versioncanon.MatchVersionInTextAny("an issue in v2.2.x", "2.2.0") // true
+rows, _ := cache.CPEEntriesCached()
+entries := cpe.LoadEntries(rows)
+name, product, version, ok := cpe.ResolveApp("apache http server 2.4.39", entries)
 ```
 
-Make raw API calls with the HTTP client:
+### Version canonicalization
 
 ```go
-var result map[string]interface{}
-err := httpclient.JSON(ctx, "GET", "https://api.example.com/data",
-    map[string]string{"Authorization": "Bearer token"}, nil, &result,
-)
+versioncanon.IsVersion("7.0")                              // true
+versioncanon.ExtractAppAndVersion("curl 7.0")              // app="curl", ver="7.0"
+versioncanon.Compare("7.0", "7.0.0")                       // 0 (equal)
+versioncanon.Compare("20.0-update1559", "20.0-u1559")      // 0 (CPE update forms equal)
+versioncanon.Compare("1.1.1k", "1.1.1")                    // 1 (letter release after)
+versioncanon.Compare("2.0.0-rc1", "2.0.0")                 // -1 (pre-release before)
+versioncanon.MatchesRange("7.0", "7.0", "", "", "7.15.0")  // true
+versioncanon.MatchVersionInText("curl 7.0 buffer overflow", "7.0") // true
+versioncanon.MatchVersionInText("fixed in curl 7.57.0", "7.57.0")  // false (negated context)
+versioncanon.ExactVariants("2.2.0")                        // zero-padding + wildcard variants
 ```
 
 ### Finding struct
 
-`cve.Finding` includes a `Score` field with the CVSS base score (parsed from NVD, prefers v3.1 → v3.0 → v2.0). Other sources leave it at `0.0`.
+`cve.Finding` includes a `Score` field (CVSS base score, v3.1 → v3.0 → v2.0) and a `Reason` field (why the finding matched). Other sources leave both empty where not applicable.
 
-```go
-type Finding struct {
-    CVE    string
-    Source string
-    Detail string
-    Score  float64
-}
-```
+## Roadmap
 
-### Packages
+- `pochunter recent` — fresh CVEs from cvelistV5 deltas or VulnCheck's mitre-cvelist-v5 index
+- EPSS enrichment into the local CVE table (FIRST EPSS API)
+- Distro backpatch awareness (Debian/Ubuntu/RHEL)
+- Fancier table rendering on top of the new TTY-aware output
 
-| Package        | Import path                                    | Description |
-|----------------|------------------------------------------------|-------------|
-| `cve`          | `github.com/Fakechippies/POC-Hunter/cve`        | Source interface + NVD, CIRCL, OSV, Vulners, GitHub Advisories |
-| `poc`          | `github.com/Fakechippies/POC-Hunter/poc`        | Source interface + poc-in-github, search-vulns |
-| `httpclient`   | `github.com/Fakechippies/POC-Hunter/httpclient` | Shared HTTP/JSON client used by all sources |
-| `versioncanon` | `github.com/Fakechippies/POC-Hunter/versioncanon`| Version canonicalization: detection, extraction, comparison, and fuzzy matching |
+## Disclaimer
 
-## Tests
+POC-Hunter aggregates publicly available vulnerability and exploit information for defensive research and authorized testing. You are responsible for complying with the terms of the upstream data sources and for what you do with this tool.
 
-19 unit tests across 3 packages (`versioncanon`, `cve`, `cli`) covering version canonicalization, product/version matching, CLI search input resolution, and structured output formats:
+## License
 
-```bash
-go test ./...
-```
-
-## TODO:
-
-- [ ] Make the default `table` output prettier (better alignment, spacing, and colors).
-- [ ] Plain formatting when piping: detect non-TTY stdout and drop ANSI colors and terminal-width-dependent wrapping, so redirected/piped `table` output stays stable and readable.
-- [ ] Add caching and retry/backoff.
+MIT — see [LICENSE](LICENSE).
