@@ -45,6 +45,8 @@ type options struct {
 	dbPath     string
 	noCache    bool
 	cacheTTL   time.Duration
+	cveTTL     time.Duration
+	refresh    bool
 }
 
 func Execute() error {
@@ -69,8 +71,10 @@ func Execute() error {
 	rootCmd.Flags().StringVarP(&opts.output, "output", "o", "table", "output format: table, json, jsonl, csv")
 	rootCmd.Flags().DurationVar(&opts.timeout, "timeout", 30*time.Second, "request timeout")
 	rootCmd.Flags().StringVar(&opts.dbPath, "db", "", "POC cache database path (overrides POCHUNTER_DB; default: os.UserCacheDir()/pochunter/pochunter.db)")
-	rootCmd.Flags().BoolVar(&opts.noCache, "no-cache", false, "disable the local POC cache")
-	rootCmd.Flags().DurationVar(&opts.cacheTTL, "cache-ttl", 24*time.Hour, "cache freshness duration (e.g. 12h, 7d as 168h)")
+	rootCmd.Flags().BoolVar(&opts.noCache, "no-cache", false, "disable all local caching (POC and CVE)")
+	rootCmd.Flags().DurationVar(&opts.cacheTTL, "cache-ttl", 24*time.Hour, "POC cache freshness duration (e.g. 12h, 7d as 168h)")
+	rootCmd.Flags().DurationVar(&opts.cveTTL, "cve-ttl", 30*time.Minute, "CVE query cache freshness duration")
+	rootCmd.Flags().BoolVar(&opts.refresh, "refresh", false, "bypass cache reads but still write (refresh cached data)")
 
 	rootCmd.SetArgs(normalizeCompatFlags(os.Args[1:]))
 	rootCmd.AddCommand(newUpdateCommand())
@@ -143,7 +147,8 @@ func run(args []string, opts options) error {
 		progressf("Searching CVEs for vendor=%q product=%q version=%q ecosystem=%q", vendor, product, version, ecosystem)
 	}
 
-	cveResults := collectCVEs(ctx, cveSources, vendor, product, version, ecosystem)
+	cveResults := collectCVEs(ctx, cveSources, vendor, product, version, ecosystem, cacheDB, opts.cveTTL, opts.refresh)
+	printCVECacheStatus(cveResults)
 	allCVEFindings, uniqueCVEs := dedupeCVEs(cveResults)
 
 	if isFreeForm {
@@ -186,9 +191,11 @@ func run(args []string, opts options) error {
 }
 
 type cveSourceResult struct {
-	source   string
-	findings []cve.Finding
-	err      error
+	source    string
+	findings  []cve.Finding
+	err       error
+	cached    bool
+	cachedAge time.Duration
 }
 
 type pocResult struct {
@@ -297,17 +304,44 @@ func buildPOCSources(cacheDB *db.DB, ttl time.Duration) []poc.Source {
 	return sources
 }
 
-func collectCVEs(ctx context.Context, sources []cve.Source, vendor, product, version, ecosystem string) []cveSourceResult {
+// cveCacheCapKeys mirrors db.CVECacheCapKeys for the per-run store calls.
+const cveCacheCapKeys = db.CVECacheCapKeys
+
+// collectCVEs queries all sources concurrently, with a read-through /
+// write-through cache per source: cached payloads are served within the TTL,
+// fresh results are stored, and per-CVE bare info is filled lazily from every
+// successful response (all API results are cached, deduped by CVE id).
+func collectCVEs(ctx context.Context, sources []cve.Source, vendor, product, version, ecosystem string, cacheDB *db.DB, cveTTL time.Duration, refresh bool) []cveSourceResult {
+	key := db.CVECacheKey(vendor, product, version, ecosystem)
 	results := make(chan cveSourceResult, len(sources))
 	var wg sync.WaitGroup
 
 	for _, source := range sources {
 		wg.Add(1)
-		go func() {
+		go func(src cve.Source) {
 			defer wg.Done()
-			findings, err := source.Query(ctx, vendor, product, version, ecosystem)
-			results <- cveSourceResult{source: source.Name(), findings: findings, err: err}
-		}()
+			var findings []cve.Finding
+			var err error
+			cached, age := false, time.Duration(0)
+
+			if cacheDB != nil && !refresh {
+				if payload, createdAt, ok, gerr := cacheDB.CVECacheGet(key, src.Name()); gerr == nil && ok {
+					if decoded, derr := unmarshalCVEPayload(payload); derr == nil {
+						findings, cached, age = decoded, true, time.Since(createdAt)
+					}
+				}
+			}
+			if !cached {
+				findings, err = src.Query(ctx, vendor, product, version, ecosystem)
+				if err == nil && cacheDB != nil {
+					if payload, merr := json.Marshal(findings); merr == nil {
+						_ = cacheDB.CVECacheStore(key, src.Name(), payload, time.Now(), cveTTL, cveCacheCapKeys)
+					}
+					_ = cacheDB.CVEInfoStore(cveInfoRows(findings), time.Now())
+				}
+			}
+			results <- cveSourceResult{source: src.Name(), findings: findings, err: err, cached: cached, cachedAge: age}
+		}(source)
 	}
 
 	wg.Wait()
@@ -319,6 +353,52 @@ func collectCVEs(ctx context.Context, sources []cve.Source, vendor, product, ver
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].source < out[j].source })
 	return out
+}
+
+func unmarshalCVEPayload(payload []byte) ([]cve.Finding, error) {
+	var findings []cve.Finding
+	if err := json.Unmarshal(payload, &findings); err != nil {
+		return nil, err
+	}
+	return findings, nil
+}
+
+// cveInfoRows reduces findings to one bare-info row per unique CVE.
+func cveInfoRows(findings []cve.Finding) []db.CVEInfoRow {
+	seen := map[string]struct{}{}
+	rows := make([]db.CVEInfoRow, 0, len(findings))
+	for _, f := range findings {
+		if f.CVE == "" {
+			continue
+		}
+		if _, dup := seen[f.CVE]; dup {
+			continue
+		}
+		seen[f.CVE] = struct{}{}
+		rows = append(rows, db.CVEInfoRow{ID: f.CVE, Summary: f.Detail})
+	}
+	return rows
+}
+
+// printCVECacheStatus makes cache hits visible so nobody debugs stale results.
+// Only prints when at least one source was served from cache.
+func printCVECacheStatus(results []cveSourceResult) {
+	parts := make([]string, 0, len(results))
+	cachedAny := false
+	for _, r := range results {
+		if r.err != nil {
+			continue
+		}
+		if r.cached {
+			cachedAny = true
+			parts = append(parts, fmt.Sprintf("%s cached (%s old)", r.source, r.cachedAge.Round(time.Second)))
+		} else {
+			parts = append(parts, r.source+" fresh")
+		}
+	}
+	if cachedAny {
+		progressf("CVE cache: %s", strings.Join(parts, ", "))
+	}
 }
 
 func dedupeCVEs(results []cveSourceResult) ([]cve.Finding, []string) {

@@ -59,6 +59,16 @@ CREATE TABLE IF NOT EXISTS indexes(
 	UNIQUE (source)
 );
 
+-- Query-level cache of CVE source results: one JSON payload per
+-- (query key, source). Ephemeral by design — short TTL, evicted on write.
+CREATE TABLE IF NOT EXISTS cve_cache(
+	key        TEXT NOT NULL,
+	source     TEXT NOT NULL,
+	payload    TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	UNIQUE (key, source)
+);
+
 -- CVE-to-POC links extracted from a bulk-index snapshot, one row per link.
 CREATE TABLE IF NOT EXISTS index_pocs(
 	source    TEXT NOT NULL,
@@ -115,6 +125,10 @@ func openWithVersion(path, appVersion string) (*DB, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("db: schema: %w", err)
 	}
+	if err := migrateSchema(sqlDB); err != nil {
+		sqlDB.Close()
+		return nil, err
+	}
 	d := &DB{sql: sqlDB, appVersion: appVersion}
 	if err := d.refreshMaintenanceState(); err != nil {
 		sqlDB.Close()
@@ -127,6 +141,38 @@ func openWithVersion(path, appVersion string) (*DB, error) {
 // change invalidates derived data; bulk indexes are wiped and rebuilt on
 // mismatch.
 const schemaVersion = "1"
+
+// migrateSchema applies idempotent migrations for databases created by older
+// versions of this package.
+func migrateSchema(sqlDB *sql.DB) error {
+	rows, err := sqlDB.Query("PRAGMA table_info(cves)")
+	if err != nil {
+		return fmt.Errorf("db: introspect cves: %w", err)
+	}
+	defer rows.Close()
+	hasFetchedAt := false
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return fmt.Errorf("db: introspect cves: %w", err)
+		}
+		if name == "fetched_at" {
+			hasFetchedAt = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("db: introspect cves: %w", err)
+	}
+	if !hasFetchedAt {
+		if _, err := sqlDB.Exec("ALTER TABLE cves ADD COLUMN fetched_at TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("db: migrate cves.fetched_at: %w", err)
+		}
+	}
+	return nil
+}
 
 // refreshMaintenanceState wipes derived data when it was built by a
 // different schema or a different app version (a release), so caches are
@@ -154,7 +200,7 @@ func (d *DB) refreshMaintenanceState() error {
 		}
 	}
 	if wipe {
-		if err := d.exec("DELETE FROM indexes; DELETE FROM index_pocs"); err != nil {
+		if err := d.exec("DELETE FROM indexes; DELETE FROM index_pocs; DELETE FROM cve_cache"); err != nil {
 			return err
 		}
 	}

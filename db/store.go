@@ -127,6 +127,18 @@ func toPOCRows(stored []storedPOC) []POCRow {
 	return out
 }
 
+// EvictStalePOCs deletes POC cache rows older than ttl. Called after stores
+// so the cache self-cleans ("delete expired on write").
+func (d *DB) EvictStalePOCs(ttl time.Duration, now time.Time) error {
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+	cutoff := now.Add(-ttl).UTC().Format(time.RFC3339)
+	if _, err := d.sql.Exec("DELETE FROM pocs WHERE fetched_at < ?", cutoff); err != nil {
+		return fmt.Errorf("db: evict stale pocs: %w", err)
+	}
+	return nil
+}
+
 // IndexRev returns the stored upstream revision of a bulk-index source, if
 // one has ever been recorded.
 func (d *DB) IndexRev(source string) (string, bool) {

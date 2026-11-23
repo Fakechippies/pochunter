@@ -59,6 +59,7 @@ func (c CachedSource) Query(ctx context.Context, CVE string) ([]Finding, error) 
 		}
 		// Storage failures are non-fatal: results are still returned.
 		_ = c.DB.StorePOCs(name, time.Now(), rows)
+		_ = c.DB.EvictStalePOCs(c.TTL, time.Now())
 		return out, nil
 	}
 	return findings, nil
