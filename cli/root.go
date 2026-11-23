@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -861,10 +863,15 @@ func printCVEFindings(source string, findings []cve.Finding, showScore bool, kev
 			}
 			lines := wrapText(detail, detailW)
 			score := fmt.Sprintf("%.1f", f.Score)
-			colored := paint(scoreColor(f.Score), score)
 			for i, line := range lines {
 				if i == 0 {
-					fmt.Printf("%-*s%*s%*s  %s\n", cveW, paint(colorBold, f.CVE), srcW+gap, paint(sourceColor(f.Source), f.Source), scoreW+gap, colored, line)
+					// Pad plain text first, then paint: ANSI codes must never
+					// influence column widths.
+					fmt.Printf("%s%s%s  %s\n",
+						paint(colorBold, fmt.Sprintf("%-*s", cveW, f.CVE)),
+						paint(sourceColor(f.Source), fmt.Sprintf("%*s", srcW+gap, f.Source)),
+						paint(scoreColor(f.Score), fmt.Sprintf("%*s", scoreW+gap, score)),
+						line)
 				} else {
 					fmt.Printf("%-*s%*s%*s  %s\n", cveW, "", srcW+gap, "", scoreW+gap, "", line)
 				}
@@ -890,7 +897,10 @@ func printCVEFindings(source string, findings []cve.Finding, showScore bool, kev
 		lines := wrapText(detail, detailW)
 		for i, line := range lines {
 			if i == 0 {
-				fmt.Printf("%-*s%*s  %s\n", cveW, paint(colorBold, f.CVE), srcW+gap, paint(sourceColor(f.Source), f.Source), line)
+				fmt.Printf("%s%s  %s\n",
+					paint(colorBold, fmt.Sprintf("%-*s", cveW, f.CVE)),
+					paint(sourceColor(f.Source), fmt.Sprintf("%*s", srcW+gap, f.Source)),
+					line)
 			} else {
 				fmt.Printf("%-*s%*s  %s\n", cveW, "", srcW+gap, "", line)
 			}
@@ -939,24 +949,68 @@ func printPOCFindings(source string, findings []poc.Finding) {
 			row.sources = append(row.sources, src)
 		}
 	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, paint(colorBold, "CVE")+"\t"+paint(colorBold, "SOURCES")+"\t"+paint(colorBold, "OWNER")+"\t"+paint(colorBold, "PUSHED AT")+"\t"+paint(colorBold, "POC"))
+
+	// Write PLAIN text through the tabwriter (escape codes would corrupt its
+	// column math), then paint the flushed lines: header bold, CVE column
+	// bold, SOURCES in the first source's color, owner/date gray.
+	var buf bytes.Buffer
+	tw := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "CVE\tSOURCES\tOWNER\tPUSHED AT\tPOC")
+	rowColors := make([]string, 0, len(rows))
 	for _, row := range rows {
 		sort.Strings(row.sources)
-		sources := paint(sourceColor(row.sources[0]), strings.Join(row.sources, ", "))
-		owner := row.owner
+		owner, pushedAt := row.owner, row.pushedAt
 		if owner == "" {
 			owner = "-"
 		}
-		pushedAt := row.pushedAt
 		if pushedAt == "" {
 			pushedAt = "-"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-			paint(colorBold, row.cve), sources, paint(colorGray, owner), paint(colorGray, pushedAt), row.url)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", row.cve, strings.Join(row.sources, ", "), owner, pushedAt, row.url)
+		rowColors = append(rowColors, sourceColor(row.sources[0]))
 	}
-	_ = w.Flush()
+	_ = tw.Flush()
+
+	lines := strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
+	for i, line := range lines {
+		if i == 0 {
+			fmt.Println(paint(colorBold, line))
+			continue
+		}
+		cells, seps := splitCells(line)
+		if len(cells) == 5 && len(seps) == 4 {
+			var sb strings.Builder
+			sb.WriteString(paint(colorBold, cells[0]))
+			sb.WriteString(seps[0])
+			sb.WriteString(paint(rowColors[i-1], cells[1]))
+			sb.WriteString(seps[1])
+			sb.WriteString(paint(colorGray, cells[2]))
+			sb.WriteString(seps[2])
+			sb.WriteString(paint(colorGray, cells[3]))
+			sb.WriteString(seps[3])
+			sb.WriteString(cells[4])
+			fmt.Println(sb.String())
+			continue
+		}
+		fmt.Println(line)
+	}
 }
+
+// splitCells splits a tabwriter-flushed line into cells and the separator
+// runs between them. Separators are 2+ space runs; cell text may contain
+// single spaces ("SOURCES" lists, "PUSHED AT").
+func splitCells(line string) (cells []string, seps []string) {
+	idx := cellSepRe.FindAllStringIndex(line, -1)
+	prev := 0
+	for _, m := range idx {
+		cells = append(cells, line[prev:m[0]])
+		seps = append(seps, line[m[0]:m[1]])
+		prev = m[1]
+	}
+	return append(cells, line[prev:]), seps
+}
+
+var cellSepRe = regexp.MustCompile(`\s{2,}`)
 
 // outputFormat selects how results are rendered: "table" (default, human
 // readable) or a machine-readable format ("json", "jsonl", "csv").
