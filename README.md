@@ -2,9 +2,8 @@
 
 CLI tool to discover CVEs and hunt public POCs, free-form search or structured product/version queries.
 
-<!-- DEMO GIF: add your demo gif right here, e.g.
-![POC-Hunter demo](docs/demo.gif)
--->
+<!-- DEMO GIF: hosted via `vhs publish assets/demo.gif` — the tape lives in
+assets/demo.tape (not committed; regenerate with `vhs assets/demo.tape`). -->
 
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -12,7 +11,7 @@ CLI tool to discover CVEs and hunt public POCs, free-form search or structured p
 
 ## Demo
 
-<!-- Leave this section exactly as-is until the gif is ready; it is intentionally empty. -->
+![Made with VHS](https://vhs.charm.sh/vhs-6n6WSJISpeL0d8JYahj9Dm.gif)
 
 ## Features
 
