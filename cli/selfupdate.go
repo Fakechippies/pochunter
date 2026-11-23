@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -130,7 +131,8 @@ func pickAsset(release *ghRelease) (asset struct {
 }
 
 // downloadAsset fetches the asset and returns the raw binary bytes,
-// extracting .tar.gz archives.
+// extracting .tar.gz archives. Inside an archive the binary is identified by
+// name (pochunter) or the executable bit, so LICENSE/README are skipped.
 func downloadAsset(ctx context.Context, url, name string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -160,7 +162,10 @@ func downloadAsset(ctx context.Context, url, name string) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
-			if hdr.Typeflag == tar.TypeReg && !strings.Contains(hdr.Name, "/") {
+			if hdr.Typeflag != tar.TypeReg {
+				continue
+			}
+			if filepath.Base(hdr.Name) == "pochunter" || hdr.FileInfo().Mode()&0o111 != 0 {
 				return io.ReadAll(tr)
 			}
 		}
