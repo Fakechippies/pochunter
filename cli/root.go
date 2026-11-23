@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"unsafe"
 
 	"github.com/Fakechippies/POC-Hunter/cve"
+	"github.com/Fakechippies/POC-Hunter/db"
 	"github.com/Fakechippies/POC-Hunter/poc"
 	"github.com/Fakechippies/POC-Hunter/versioncanon"
 	"github.com/spf13/cobra"
@@ -40,6 +42,9 @@ type options struct {
 	sources    []string
 	output     string
 	timeout    time.Duration
+	dbPath     string
+	noCache    bool
+	cacheTTL   time.Duration
 }
 
 func Execute() error {
@@ -63,6 +68,9 @@ func Execute() error {
 	rootCmd.Flags().StringSliceVar(&opts.sources, "sources", nil, "CVE sources to use (comma-separated: nvd,circl,osv,vulners,github)")
 	rootCmd.Flags().StringVarP(&opts.output, "output", "o", "table", "output format: table, json, jsonl, csv")
 	rootCmd.Flags().DurationVar(&opts.timeout, "timeout", 30*time.Second, "request timeout")
+	rootCmd.Flags().StringVar(&opts.dbPath, "db", "", "POC cache database path (default: ~/.cache/pochunter/cache.db)")
+	rootCmd.Flags().BoolVar(&opts.noCache, "no-cache", false, "disable the local POC cache")
+	rootCmd.Flags().DurationVar(&opts.cacheTTL, "cache-ttl", 24*time.Hour, "cache freshness duration (e.g. 12h, 7d as 168h)")
 
 	rootCmd.SetArgs(normalizeCompatFlags(os.Args[1:]))
 	return rootCmd.Execute()
@@ -91,8 +99,13 @@ func run(args []string, opts options) error {
 	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 	defer cancel()
 
+	cacheDB := openCacheDB(opts)
+	if cacheDB != nil {
+		defer cacheDB.Close()
+	}
+
 	cveSources := buildCVESourcesFromEnv(opts.sources)
-	pocSources := buildPOCSources()
+	pocSources := buildPOCSources(cacheDB, opts.cacheTTL)
 
 	if opts.pocMode {
 		if len(args) == 0 {
@@ -217,11 +230,39 @@ func buildCVESourcesFromEnv(want []string) []cve.Source {
 	return sources
 }
 
-func buildPOCSources() []poc.Source {
+// openCacheDB opens the shared cache database unless caching is disabled.
+// Failures are reported but never fatal: the tool works without a cache.
+func openCacheDB(opts options) *db.DB {
+	if opts.noCache {
+		return nil
+	}
+	path := strings.TrimSpace(opts.dbPath)
+	if path == "" {
+		if base, err := os.UserCacheDir(); err == nil {
+			path = filepath.Join(base, "pochunter", "cache.db")
+		}
+	}
+	if path == "" {
+		return nil
+	}
+	d, err := db.Open(path)
+	if err != nil {
+		warnf("cache disabled: %v", err)
+		return nil
+	}
+	return d
+}
+
+func buildPOCSources(cacheDB *db.DB, ttl time.Duration) []poc.Source {
 	var sources []poc.Source
 	sources = append(sources, poc.POCInGithub{})
 	if key := strings.TrimSpace(os.Getenv("SEARCHVULNS_API_KEY")); key != "" {
 		sources = append(sources, poc.SearchVulns{APIKey: key})
+	}
+	if cacheDB != nil && ttl > 0 {
+		for i, s := range sources {
+			sources[i] = poc.CachedSource{Inner: s, DB: cacheDB, TTL: ttl}
+		}
 	}
 	return sources
 }

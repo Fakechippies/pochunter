@@ -3,8 +3,8 @@ package poc
 import (
 	"context"
 	"fmt"
-	"strings"
 
+	"github.com/Fakechippies/POC-Hunter/db"
 	"github.com/Fakechippies/POC-Hunter/httpclient"
 )
 
@@ -35,28 +35,9 @@ func (o SearchVulns) Query(ctx context.Context, CVE string) ([]Finding, error) {
 	var findings []Finding
 	for _, v := range searchVulnResp.Vulns {
 		for _, poc := range v.Exploits {
-			findings = append(findings, Finding{CVE: CVE, Owner: extractOwner(poc), POC: poc, PushedAt: "-", Source: "search-vulns"})
+			findings = append(findings, Finding{CVE: CVE, Owner: db.ExtractOwner(poc), POC: poc, PushedAt: "-", Source: "search-vulns"})
 		}
 	}
 
 	return findings, nil
-}
-
-func extractOwner(link string) string {
-	s := strings.TrimPrefix(link, "https://")
-	s = strings.TrimPrefix(s, "http://")
-
-	parts := strings.Split(s, "/")
-	// parts[0] == host, e.g, "github.com"
-	host := parts[0]
-
-	switch host {
-	case "github.com", "gitee.com", "gitlab.com", "bitbucket.org":
-		if len(parts) >= 2 {
-			return parts[1]
-		}
-		return host
-	default:
-		return host
-	}
 }
